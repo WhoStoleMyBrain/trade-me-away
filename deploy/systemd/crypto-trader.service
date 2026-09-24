@@ -1,0 +1,22 @@
+[Unit]
+Description=Auditable Coinbase spot trader (mode explicitly set in .env)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=crypto-trader
+Group=crypto-trader
+WorkingDirectory=/opt/crypto-trader
+ExecStart=/opt/crypto-trader/.venv/bin/python -m trader run --scheduled
+TimeoutStartSec=15min
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/crypto-trader/var
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StandardOutput=journal
+StandardError=journal
+# No Restart=on-failure: uncertain orders require reconciliation, never blind retries.
