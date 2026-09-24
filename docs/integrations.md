@@ -31,7 +31,7 @@ testing, not authenticated exchange certification.
 | [Accounts](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/accounts/list-accounts) | Complete cursor pagination, `available_balance` + `hold`, account portfolio identity |
 | [Products](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/products/get-product) | Exact spot/base/USDC identity; trade flags; base, quote and price increments and min/max sizes |
 | [Best bid/ask](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/products/get-best-bid-ask) | Exact product, two-sided book and exchange timestamp required |
-| [Candles](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/products/get-product-candles) | Epoch start/end, official granularity enum, at most 350 bars/request |
+| [Candles](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/products/get-product-candles) | Epoch start/end, official granularity enum including FOUR_HOUR and ONE_DAY, at most 350 bars/request |
 | [Create order](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/orders/create-order) | Unique persisted client ID; duplicate ID returns existing order; CDP key determines portfolio |
 | [Get order](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/orders/get-order) | Match identity, status, settled flag, number of fills, filled size/value and fees; inspect pending cancellation |
 | [Cancel orders](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/orders/cancel-order) | `cancel_orders(order_ids=[owned_id])`, POST `/orders/batch_cancel`; per-order success acknowledges initiation only |
@@ -47,10 +47,17 @@ quote currency.
 IOC applies to buys and sells; the exchange cancels the unfilled remainder immediately.
 [Official order types](https://help.coinbase.com/en/coinbase/trading-and-funding/advanced-trade/order-types).
 The default 15-second SDK HTTP timeout is independent of time-in-force. The 120-second local order
-age backstop asks to cancel a verified owned order still open, with a separate minute-scale recovery
-timer; it cannot promise exchange release by a fixed wall-clock deadline. SDK cancellation and fee
+age backstop permits cancellation of a verified owned order still open. The separate recovery timer
+checks every 15 minutes after completion, so cancellation may wait until that check; it cannot
+promise exchange release by a fixed wall-clock deadline. SDK cancellation and fee
 summary signatures were inspected locally; cancellation's HTTP payload is tested using the official
 SDK with a mocked transport.
+
+The five configured candle intervals use the existing `get_candles(product_id, start, end,
+granularity, limit)` SDK method. Four-hour/daily signatures and accepted API granularities were
+rechecked; their serialized GET requests are tested using the official SDK with a mocked transport.
+Only completed UTC buckets enter features; quotes and accounts have independent freshness checks.
+No native TP/SL order is submitted by this version; see the [implementation plan](tp-sl-plan.md).
 
 Fills can use quote-denominated size, which is converted to base with Decimal price. Cursor-only fill
 pagination is followed until exhaustion, with repeated-cursor/page caps failing closed. Coinbase

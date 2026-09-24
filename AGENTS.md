@@ -29,6 +29,12 @@
   orders or automatically replace them. Keep doctor/reconcile and paper maintenance read-only at Coinbase.
 - Order maintenance must run without OpenAI, cost-budget approval, or a fresh strategy decision, and
   share the trading process lock. Never treat elapsed time or an empty lookup as proof of no submission.
+- Keep maintenance infrequent (15 minutes by default) and return early when no orders are pending.
+  Do not add minute polling, a daemon, or indicator/model work to that path without explicit approval.
+- Four-hour and daily features use completed UTC candles, evaluated in the same three-hour cycle.
+  Preserve separate freshness checks for current quotes/accounts and one joint model request.
+- TP/SL support is a plan in docs/tp-sl-plan.md, not an implemented trading mode. Do not silently
+  enable protective orders or change IOC behavior while implementing unrelated work.
 - Validate configured fee allowances against the current exchange tier in both modes before sizing.
 - Preserve atomic fill/ledger accounting, mode separation, UTC timestamps, locking, and cycle uniqueness.
 - Never add withdrawals, transfers, leverage, borrowing, futures or derivatives unless explicitly

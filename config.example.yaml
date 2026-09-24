@@ -18,6 +18,9 @@ market:
     - {granularity: FIVE_MINUTE, count: 300}
     - {granularity: FIFTEEN_MINUTE, count: 300}
     - {granularity: ONE_HOUR, count: 300}
+    # Multi-day context, evaluated only during the same three-hour trading cycle.
+    - {granularity: FOUR_HOUR, count: 180}
+    - {granularity: ONE_DAY, count: 120}
   max_snapshot_skew_seconds: 90
   candle_close_grace_seconds: 180
 

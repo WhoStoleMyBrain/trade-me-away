@@ -60,8 +60,8 @@ def test_doctor_shows_mode_without_trading(
 ):
     write_config(cfg, monkeypatch, tmp_path)
     monkeypatch.setenv("TRADING_MODE", mode)
-    monkeypatch.setattr("trader.__main__.build_adapters", lambda *_: {"main": adapter})
-    monkeypatch.setattr("trader.__main__.OpenAI", lambda **_: openai_mock)
+    monkeypatch.setattr("trader.coinbase_client.build_adapters", lambda *_: {"main": adapter})
+    monkeypatch.setattr("openai.OpenAI", lambda **_: openai_mock)
     assert main(["doctor"]) == 0
     assert f"TRADING MODE: {mode.upper()}" in capsys.readouterr().out
     openai_mock.models.retrieve.assert_called_once_with(cfg.llm.model)
@@ -73,7 +73,7 @@ def test_doctor_shows_mode_without_trading(
 def test_cli_errors_never_print_secrets(cfg, monkeypatch, tmp_path, capsys):
     write_config(cfg, monkeypatch, tmp_path)
     monkeypatch.setattr(
-        "trader.__main__.build_adapters", Mock(side_effect=RuntimeError("SECRET_SENTINEL"))
+        "trader.coinbase_client.build_adapters", Mock(side_effect=RuntimeError("SECRET_SENTINEL"))
     )
     assert main(["doctor"]) == 1
     captured = capsys.readouterr()
@@ -98,7 +98,7 @@ def test_sdk_owned_log_handler_is_silenced(capsys):
 def test_inspection_is_available_without_network(cfg, monkeypatch, tmp_path, capsys):
     write_config(cfg, monkeypatch, tmp_path)
     build = Mock(side_effect=AssertionError("network adapter should not be built"))
-    monkeypatch.setattr("trader.__main__.build_adapters", build)
+    monkeypatch.setattr("trader.coinbase_client.build_adapters", build)
     for command in ("show-orders", "show-costs", "show-state"):
         assert main([command]) == 0
     build.assert_not_called()

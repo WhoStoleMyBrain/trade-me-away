@@ -341,9 +341,9 @@ def test_maintenance_ignores_model_connectivity_and_budget(
     store.reserve_request("spent", "cycle", cfg.llm, cfg.llm.daily_budget_usd, NOW)
     write_config(cfg, monkeypatch, tmp_path)
     monkeypatch.setenv("TRADER_DB", str(tmp_path / "trader.sqlite3"))
-    monkeypatch.setattr("trader.__main__.build_adapters", lambda *_: {"main": adapter})
+    monkeypatch.setattr("trader.coinbase_client.build_adapters", lambda *_: {"main": adapter})
     model = Mock(side_effect=AssertionError("must not instantiate OpenAI"))
-    monkeypatch.setattr("trader.__main__.OpenAI", model)
+    monkeypatch.setattr("openai.OpenAI", model)
     assert main(["maintain-orders"]) == 0
     model.assert_not_called()
     sdk.get_product.assert_not_called()
@@ -354,6 +354,37 @@ def test_maintenance_skips_busy_database(cfg, monkeypatch, tmp_path):
     write_config(cfg, monkeypatch, tmp_path)
     with process_lock(tmp_path / "state.lock"):
         assert main(["maintain-orders"]) == 0
+
+
+@pytest.mark.parametrize("mode", ["paper", "live"])
+def test_idle_maintenance_skips_sdk_and_indicator_imports(cfg, monkeypatch, tmp_path, mode):
+    import builtins
+
+    write_config(cfg, monkeypatch, tmp_path)
+    monkeypatch.setenv("TRADING_MODE", mode)
+    for portfolio in cfg.portfolios.values():
+        for key in (portfolio.api_key_env, portfolio.api_secret_env, portfolio.portfolio_id_env):
+            monkeypatch.delenv(key, raising=False)
+    original = builtins.__import__
+    expensive = (
+        "openai",
+        "coinbase",
+        "numpy",
+        "pandas",
+        "trader.coinbase_client",
+        "trader.execution",
+        "trader.market_data",
+        "trader.orchestrator",
+        "trader.llm",
+    )
+
+    def light_import(name, *args, **kwargs):
+        if name.startswith(expensive):
+            raise AssertionError("Idle maintenance must not load the trading pipeline")
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", light_import)
+    assert main(["maintain-orders"]) == 0
 
 
 def test_recovery_checks_all_intents_even_when_one_is_unresolved(
@@ -471,8 +502,8 @@ def test_doctor_remains_read_only_for_overdue_live_orders(
     pending(cfg, store, adapter, sdk, actual, ledger, intent)
     write_config(cfg, monkeypatch, tmp_path)
     monkeypatch.setenv("TRADER_DB", str(tmp_path / "trader.sqlite3"))
-    monkeypatch.setattr("trader.__main__.build_adapters", lambda *_: {"main": adapter})
-    monkeypatch.setattr("trader.__main__.OpenAI", lambda **_: Mock())
+    monkeypatch.setattr("trader.coinbase_client.build_adapters", lambda *_: {"main": adapter})
+    monkeypatch.setattr("openai.OpenAI", lambda **_: Mock())
     assert main(["doctor"]) == 1
     sdk.cancel_orders.assert_not_called()
     sdk.limit_order_ioc.assert_not_called()

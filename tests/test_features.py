@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 from conftest import NOW, candle_rows
 
-from trader.config import GRANULARITIES
+from trader.config import GRANULARITIES, MarketConfig
 from trader.errors import SafetyError
 from trader.features import atr, closed_candles, compute_features, rsi, timeframe_features
 
@@ -111,3 +111,32 @@ def test_unfinished_candle_values_do_not_affect_closed_indicators(cfg):
         }
     )
     assert compute_features(raw, cfg.market, NOW) == expected
+
+
+def test_longer_timeframes_have_closed_trend_and_volatility_context(cfg):
+    features = compute_features(raw_data(cfg), cfg.market, NOW)
+    for seconds, last in ((14400, 101.79), (86400, 101.19)):
+        assert features[f"{seconds}s_rsi14"] == 100
+        assert features[f"{seconds}s_atr14"] == pytest.approx(2)
+        assert features[f"{seconds}s_normalized_atr14"] == pytest.approx(2 / last, abs=1e-10)
+        assert features[f"{seconds}s_ema12_over_ema26"] > 0
+        assert features[f"{seconds}s_log_trend_slope_per_hour24"] > 0
+        assert features[f"{seconds}s_max_drawdown72"] == 0
+    # Intraday quotes may be current while higher-timeframe candles end at earlier UTC boundaries.
+    assert (
+        features["14400s_closed_at_epoch"]
+        == NOW.replace(hour=8, minute=0, second=0, microsecond=0).timestamp()
+    )
+    assert (
+        features["86400s_closed_at_epoch"]
+        == NOW.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    )
+    assert cfg.market == MarketConfig()  # Example and program defaults must agree.
+
+
+@pytest.mark.parametrize("granularity", ["FOUR_HOUR", "ONE_DAY"])
+def test_missing_long_timeframe_history_is_not_inferred(cfg, granularity):
+    raw = raw_data(cfg)
+    del raw[granularity][-1]
+    with pytest.raises(SafetyError, match="CANDLE_DATA"):
+        compute_features(raw, cfg.market, NOW)

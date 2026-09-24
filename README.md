@@ -31,7 +31,7 @@ flowchart TD
     Paper --> Ledger[Atomic accounting and portfolio reconciliation]
     Live --> Ledger
     Ledger --> DB[(SQLite audit and strategy state)]
-    Watch[systemd order recovery every minute] --> Recover[Verify original orders; cancel overdue owned orders in live mode]
+    Watch[systemd order recovery every 15 minutes] --> Recover[Verify original orders; cancel overdue owned orders in live mode]
     Recover --> Ledger
 ```
 
@@ -136,15 +136,32 @@ the actual effects of earlier fills and may be reduced or rejected.
 
 ## Features and historical context
 
-Defaults fetch 300 candles each at 5 minutes, 15 minutes, and 1 hour. The close grace of 180 seconds
-allows publication time before selecting closed bars. Every timeframe must have continuous, valid
-OHLCV history through its expected cutoff. The system never forward-fills missing candles.
+Defaults fetch 300 candles each at 5 minutes, 15 minutes, and 1 hour, plus 180 four-hour candles
+(30 days) and 120 daily candles (120 days). The longer timeframes add context for multi-day trades
+using the same deterministic indicators. All five are fetched and calculated during the existing
+three-hour cycle, followed by one joint model request. There is no separate feature polling job.
+
+The close grace of 180 seconds allows publication time before selecting closed bars. Every
+timeframe must have continuous, valid OHLCV history through its expected UTC cutoff. The system
+never forward-fills missing candles. Daily features use the last completed UTC day; they do not
+use the current day's unfinished bar. Four-hour features similarly stop at a completed four-hour
+boundary. Their `closed_at_epoch` fields make those different observation times explicit.
 
 Local features include 15m/1h/3h/6h/12h/24h/3d returns, EMA12/26 relationships, Wilder-style
 exponentially smoothed RSI14 and ATR14, normalized ATR, 24-bar realized volatility, 12-bar volume
 change, volume z-score, 72-bar high/low distances and drawdowns, 24-bar log trend slope per hour,
 and spread. Returns use the finest configured timeframe with sufficient coverage. Volatility is
 scaled to 24 bars, not annualized. All indicators use only closed data at the supplied cutoff.
+The `14400s_` and `86400s_` prefixes identify the new four-hour and daily features. Existing return
+horizons remain 15m through 3d. Quotes/accounts still require fresh reads; long candle durations do
+not relax those checks.
+
+If you already have an explicit `market.candles` list in `config.yaml`, add the `FOUR_HOUR` and
+`ONE_DAY` entries from `config.example.yaml`; explicit lists are not silently expanded. Fetching
+five timeframes adds two candle reads per asset per cycle. The defaults remain well within one
+request per timeframe, without a cache, daemon, or new dependency. An asset without enough daily
+history fails closed; choose an explicit supported history length (minimum 80 bars) or omit that
+timeframe rather than manufacturing history.
 
 The model gets compact features, current portfolio equity/cash/exposures, entry cost, unrealized and
 realized strategy PnL, position age, last actual action, time since last fill, and recent trade count
@@ -232,15 +249,18 @@ HTTP timeouts do **not** cancel exchange orders. These controls have separate pu
 | Setting / job | Default | Purpose |
 |---|---|---|
 | `execution.coinbase_timeout_seconds` | 15 seconds | SDK HTTP timeout; a submission timeout leaves the outcome uncertain |
-| `execution.max_order_age_seconds` | 120 seconds | Cancel a verified strategy order still open after this age, measured from persisted intent creation |
+| `execution.max_order_age_seconds` | 120 seconds | An open strategy order becomes eligible for cancellation at the next recovery check after this age |
 | `execution.cancel_retry_seconds` | 60 seconds | Minimum interval between cancellation requests, always after another state/identity read |
 | `execution.max_cancel_attempts` | 3 per order | Bound cancellation attempts across restarts; verification continues after the cap |
-| `crypto-trader-orders.timer` | 60 seconds after each check completes | Recover unresolved orders between three-hour decision cycles and after reboot |
+| `crypto-trader-orders.timer` | 15 minutes after each check completes | Recover unresolved orders between three-hour decision cycles and after reboot |
 
 Install **both timers** below for unattended use. The recovery job runs
 `python -m trader maintain-orders`. It takes the same process lock, never calls OpenAI, never creates a new order, and
 does not depend on model connectivity, API budgets, market indicators, or a trading-cycle slot.
-With no unresolved intent it has no exchange work to do. Run it manually for a one-off recovery check.
+With no unresolved intent it returns after the local configuration/database checks, before loading
+the Coinbase SDK, OpenAI SDK or pandas/numpy pipeline. It makes no exchange request. Run it manually
+for a one-off recovery check. This is roughly 96 scheduled checks per day instead of 1,440; it is
+not continuous market monitoring.
 
 In exact `TRADING_MODE=live`, maintenance and trading-cycle recovery may cancel an overdue order only
 after a fresh GET confirms its saved client ID, exchange ID, product, side, spot type and portfolio.
@@ -257,11 +277,16 @@ blocks both modes. A PREPARED-only intent is safely aborted because the durable 
 must precede any network submission; an uncertain submission can never be cleared merely by age or
 an empty discovery result.
 
-The two-minute deadline triggers a **best-effort cancellation request**, not a guaranteed release
-time. Timer cadence, an active trading lock, exchange settlement delays, outages, or a stopped host
-can extend it. IOC remains exchange-enforced when the host is offline. Exhausted cancellation
+The two-minute age threshold permits a **best-effort cancellation request**, not a guaranteed
+two-minute release. The 15-minute timer can delay the request until the next check, and API polling,
+an active trading lock, settlement delays, outages, or a stopped host can extend it. IOC remains
+exchange-enforced when the host is offline. Exhausted cancellation
 attempts or unresolved outcomes require inspecting the original order in Coinbase; never delete its
 history or submit a replacement to clear the block.
+
+TP/SL orders are **not implemented**. The [TP/SL implementation plan](docs/tp-sl-plan.md) describes
+the smallest proposed extension and the verification work it requires. In particular, long-lived
+protective orders must not inherit IOC cancellation deadlines or be mistaken for unexplained holds.
 
 After paper testing and reviewing the database, fees and risk limits:
 
@@ -354,10 +379,16 @@ keys use the same parsing as the CLI. Only `var/` is writable under the hardened
 The timer runs at 00:05, 03:05, …, 21:05 **UTC**. `Persistent=false` prevents catching up missed
 triggers. `run --scheduled` also rejects launches outside boundary +5 through +20 minutes. There
 are no failure-triggered trading restarts. On a restart the trading timer waits for its next future
-trigger. The order-recovery timer starts after boot and runs 60 seconds after its previous check
+trigger. The order-recovery timer starts after boot and runs 15 minutes after its previous check
 finishes, without scheduling a model decision. It reports BUSY and waits for its next tick if another
 command holds the lock. Its five-minute service limit bounds a hung check; durable intent/cancellation
 records allow the next check to resume verification safely. Monitor both services' failed statuses.
+
+When upgrading from the old minute schedule, copy the updated `crypto-trader-orders.timer` unit
+as above, then run `sudo systemctl daemon-reload` and
+`sudo systemctl restart crypto-trader-orders.timer`. Check `systemctl cat crypto-trader-orders.timer`
+for old local overrides: an existing drop-in can retain a faster interval. The trading timer remains
+every three hours. No systemd changes are applied automatically by installing the Python package.
 
 ## Adding another cryptocurrency or portfolio
 

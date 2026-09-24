@@ -30,6 +30,17 @@ def test_complete_joint_paper_cycle(cfg, store, adapter, sdk, openai_mock):
     assert openai_mock.responses.create.call_count == 1
     for product in PRODUCTS:
         assert product in openai_mock.responses.create.call_args.kwargs["input"]
+    payload = openai_mock.responses.create.call_args.kwargs["input"]
+    assert "14400s_ema12_over_ema26" in payload
+    assert "86400s_normalized_atr14" in payload
+    assert len(payload.encode()) < cfg.llm.max_prompt_bytes
+    for product in PRODUCTS:
+        fetched = {
+            c.kwargs["granularity"]
+            for c in sdk.get_candles.call_args_list
+            if c.kwargs["product_id"] == product
+        }
+        assert fetched == {c.granularity for c in cfg.market.candles}
     assert len(store.rows("computed_features")) == 3
     assert len(store.rows("market_snapshots")) == 3
     assert len(store.rows("risk_results")) == 6

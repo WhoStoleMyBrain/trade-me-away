@@ -199,3 +199,32 @@ def test_official_fee_sdk_http_contract(monkeypatch, cfg):
     )
     assert request.call_args.kwargs["params"] == {"product_type": "SPOT"}
     client.session.close()
+
+
+@pytest.mark.parametrize("granularity,count", [("FOUR_HOUR", 180), ("ONE_DAY", 120)])
+def test_official_long_candle_sdk_http_contract(monkeypatch, granularity, count):
+    from coinbase.rest import RESTClient
+
+    from trader.coinbase_client import CoinbaseAdapter
+
+    client = RESTClient(api_key="unit-test-unused", api_secret="unit-test-unused", timeout=15)
+    monkeypatch.setattr(client, "set_headers", lambda *_: {})
+    response = requests.Response()
+    response.status_code = 200
+    response._content = b'{"candles":[]}'
+    request = Mock(return_value=response)
+    monkeypatch.setattr(client.session, "request", request)
+    adapter = CoinbaseAdapter(client, "main", "test-portfolio")
+    assert adapter.candles("BTC-USDC", granularity, 100, 200, count) == []
+    assert request.call_args.args == (
+        "GET",
+        "https://api.coinbase.com/api/v3/brokerage/products/BTC-USDC/candles",
+    )
+    assert request.call_args.kwargs["params"] == {
+        "start": "100",
+        "end": "200",
+        "granularity": granularity,
+        "limit": count,
+    }
+    request.assert_called_once()
+    client.session.close()

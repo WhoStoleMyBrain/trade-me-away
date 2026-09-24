@@ -5,15 +5,8 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
-from openai import OpenAI
-
-from trader.coinbase_client import build_adapters
 from trader.config import active_mode, environment_values, load_config
 from trader.errors import SafetyError
-from trader.execution import make_executor, recover_orders
-from trader.llm import DecisionClient
-from trader.market_data import MarketData
-from trader.orchestrator import Orchestrator
 from trader.storage import Storage, process_lock
 from trader.util import configure_logging, dumps, utcnow
 
@@ -73,6 +66,14 @@ def main(argv: list[str] | None = None) -> int:
                         result["cancellation_attempts"] = store.rows("cancellation_attempts")
                     print(dumps(result))
                 return 0
+            if args.command == "maintain-orders" and not store.unresolved():
+                # Most maintenance invocations have no work. Avoid initializing SDKs or importing
+                # the model/indicator pipeline, and do not require Coinbase credentials for a no-op.
+                print(dumps({"status": "OK", "mode": mode, "unresolved_orders": []}))
+                return 0
+            from trader.coinbase_client import build_adapters
+            from trader.execution import make_executor, recover_orders
+
             adapters = build_adapters(cfg, environment_values(args.env_file))
             if args.command == "maintain-orders":
                 # No market data, model request, budget gate or cycle slot needed to reduce
@@ -87,6 +88,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 print(dumps({"status": "OK", "mode": mode, "unresolved_orders": []}))
                 return 0
+            from openai import OpenAI
+
+            from trader.llm import DecisionClient
+            from trader.market_data import MarketData
+            from trader.orchestrator import Orchestrator
+
             client = OpenAI(
                 api_key=env.OPENAI_API_KEY.get_secret_value(),
                 max_retries=0,

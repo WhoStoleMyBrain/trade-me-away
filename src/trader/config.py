@@ -83,6 +83,8 @@ class MarketConfig(ConfigModel):
             CandleConfig(granularity="FIVE_MINUTE"),
             CandleConfig(granularity="FIFTEEN_MINUTE"),
             CandleConfig(granularity="ONE_HOUR"),
+            CandleConfig(granularity="FOUR_HOUR", count=180),
+            CandleConfig(granularity="ONE_DAY", count=120),
         ]
     )
     max_snapshot_skew_seconds: int = Field(default=90, ge=1, le=300)
