@@ -1,0 +1,65 @@
+# References to environment variables only. Never put credentials here.
+portfolios:
+  main:
+    portfolio_id_env: COINBASE_MAIN_PORTFOLIO_ID
+    api_key_env: COINBASE_MAIN_API_KEY
+    api_secret_env: COINBASE_MAIN_API_SECRET
+    paper_initial_usdc: "1000"
+assets:
+  - product_id: BTC-USDC
+    portfolio: main
+  - product_id: ETH-USDC
+    portfolio: main
+  - product_id: SOL-USDC
+    portfolio: main
+
+market:
+  candles:
+    - {granularity: FIVE_MINUTE, count: 300}
+    - {granularity: FIFTEEN_MINUTE, count: 300}
+    - {granularity: ONE_HOUR, count: 300}
+  max_snapshot_skew_seconds: 90
+  candle_close_grace_seconds: 180
+
+llm:
+  model: gpt-6-luna
+  reasoning_effort: medium
+  max_output_tokens: 4096
+  max_prompt_bytes: 48000
+  attempts: 3
+  timeout_seconds: 90
+  daily_budget_usd: "1"
+  monthly_budget_usd: "10"
+  pricing:
+    model: gpt-6-luna
+    input_per_million: "0.10"
+    cached_input_per_million: "0.01"
+    cache_write_per_million: "0.125"
+    output_per_million: "0.50"
+    verified_on: "2026-09-24"
+
+risk:
+  max_portfolio_exposure: "0.60"
+  max_asset_exposure: "0.30"
+  max_order_notional: "100"
+  min_order_notional: "10"
+  max_trades_per_day: 6
+  min_trade_interval_seconds: 10800
+  max_daily_loss_fraction: "0.03"
+  max_spread_bps: "30"
+  max_price_move_fraction: "0.005"
+  min_confidence: "0.70"
+  max_data_age_seconds: 120
+  max_decision_age_seconds: 300
+  balance_tolerance_base: "0.00000001"
+  balance_tolerance_quote: "0.01"
+
+execution:
+  order_type: limit_ioc
+  # Illustrative conservative assumptions; set these to your actual Coinbase fee tier.
+  taker_fee_rate: "0.006"
+  slippage_bps: "5"
+  limit_offset_bps: "10"
+  paper_fill_fraction: "1"
+  verification_attempts: 5
+  verification_delay_seconds: 1
