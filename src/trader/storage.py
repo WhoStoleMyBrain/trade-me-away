@@ -48,7 +48,7 @@ class Storage:
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1):
+        if version not in (0, 1, 2):
             raise SafetyError("DATABASE_VERSION_UNSUPPORTED")
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS trading_cycles (
@@ -99,7 +99,15 @@ class Storage:
             );
             CREATE INDEX IF NOT EXISTS api_usage_date ON api_usage(created_at);
             CREATE INDEX IF NOT EXISTS fills_portfolio ON fills(mode, portfolio, trade_time);
-            PRAGMA user_version=1;
+            CREATE TABLE IF NOT EXISTS cancellation_attempts (
+                id INTEGER PRIMARY KEY, client_order_id TEXT NOT NULL,
+                order_id TEXT NOT NULL, cycle_id TEXT NOT NULL, mode TEXT NOT NULL,
+                requested_at TEXT NOT NULL, status TEXT NOT NULL,
+                FOREIGN KEY(client_order_id) REFERENCES order_intents(client_order_id)
+            );
+            CREATE INDEX IF NOT EXISTS cancellations_client
+                ON cancellation_attempts(client_order_id);
+            PRAGMA user_version=2;
         """)
         for table in sorted(AUDIT_TABLES):
             self.db.execute(f"""CREATE TABLE IF NOT EXISTS {table} (
@@ -243,6 +251,46 @@ class Storage:
             WHERE status NOT IN ('FILLED','PARTIAL','CANCELLED','REJECTED','ABORTED')""").fetchall()
         return [OrderIntent.model_validate_json(r[0]) for r in rows]
 
+    def saved_intent(self, client_id: str) -> tuple[OrderIntent, str]:
+        row = self.db.execute(
+            "SELECT intent_json,status FROM order_intents WHERE client_order_id=?", (client_id,)
+        ).fetchone()
+        if row is None:
+            raise SafetyError("ORDER_INTENT_MISSING")
+        return OrderIntent.model_validate_json(row[0]), row[1]
+
+    def cancellations(self, client_id: str) -> list[dict]:
+        return [
+            dict(r)
+            for r in self.db.execute(
+                "SELECT * FROM cancellation_attempts WHERE client_order_id=? ORDER BY id",
+                (client_id,),
+            )
+        ]
+
+    def begin_cancellation(self, intent: OrderIntent, order_id: str) -> int:
+        # Durable before the POST, including when the process dies during the request.
+        with self.db:
+            cursor = self.db.execute(
+                """INSERT INTO cancellation_attempts
+                (client_order_id,order_id,cycle_id,mode,requested_at,status) VALUES(?,?,?,?,?,?)""",
+                (
+                    intent.client_order_id,
+                    order_id,
+                    intent.cycle_id,
+                    intent.mode,
+                    utcnow().isoformat(),
+                    "REQUESTED",
+                ),
+            )
+            return cursor.lastrowid
+
+    def finish_cancellation(self, attempt_id: int, status: str) -> None:
+        with self.db:
+            self.db.execute(
+                "UPDATE cancellation_attempts SET status=? WHERE id=?", (status, attempt_id)
+            )
+
     def result(self, client_id: str) -> ExecutionResult | None:
         row = self.db.execute(
             "SELECT result_json FROM orders WHERE client_order_id=?", (client_id,)
@@ -313,6 +361,14 @@ class Storage:
 
     def applied_fill_ids(self, mode: str) -> set[str]:
         return {r[0] for r in self.db.execute("SELECT fill_id FROM fills WHERE mode=?", (mode,))}
+
+    def order_fill_ids(self, client_id: str) -> set[str]:
+        return {
+            r[0]
+            for r in self.db.execute(
+                "SELECT fill_id FROM fills WHERE client_order_id=?", (client_id,)
+            )
+        }
 
     def spending(self, now: datetime) -> tuple[D, D]:
         day, month = now.date().isoformat(), now.strftime("%Y-%m")
@@ -388,6 +444,7 @@ class Storage:
             "api_usage",
             "exchange_state",
             "daily_marks",
+            "cancellation_attempts",
         }
         if table not in allowed:
             raise ValueError("unknown table")

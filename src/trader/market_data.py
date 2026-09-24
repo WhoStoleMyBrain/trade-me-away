@@ -28,7 +28,9 @@ class MarketData:
             currencies = {
                 a.product_id.split("-")[0] for a in self.cfg.enabled_assets if a.portfolio == name
             }
-            return self.adapters[name].account(currencies | {"USDC"})
+            adapter = self.adapters[name]
+            adapter.check_fee_rate(self.cfg.execution.taker_fee_rate)
+            return adapter.account(currencies | {"USDC"})
 
         with ThreadPoolExecutor(max_workers=min(8, len(self.adapters))) as pool:
             return dict(zip(self.adapters, pool.map(fetch, self.adapters), strict=True))

@@ -10,7 +10,7 @@ from openai import OpenAI
 from trader.coinbase_client import build_adapters
 from trader.config import active_mode, environment_values, load_config
 from trader.errors import SafetyError
-from trader.execution import make_executor
+from trader.execution import make_executor, recover_orders
 from trader.llm import DecisionClient
 from trader.market_data import MarketData
 from trader.orchestrator import Orchestrator
@@ -22,7 +22,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Fail-closed Coinbase spot trader")
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument(
-        "command", choices=["doctor", "run", "reconcile", "show-state", "show-costs", "show-orders"]
+        "command",
+        choices=[
+            "doctor",
+            "run",
+            "reconcile",
+            "maintain-orders",
+            "show-state",
+            "show-costs",
+            "show-orders",
+        ],
     )
     parser.add_argument(
         "--scheduled",
@@ -59,11 +68,25 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 else:
                     table = "strategy_state" if args.command == "show-state" else "orders"
-                    print(
-                        dumps({table: store.rows(table), "unresolved_orders": store.unresolved()})
-                    )
+                    result = {table: store.rows(table), "unresolved_orders": store.unresolved()}
+                    if args.command == "show-orders":
+                        result["cancellation_attempts"] = store.rows("cancellation_attempts")
+                    print(dumps(result))
                 return 0
             adapters = build_adapters(cfg, environment_values(args.env_file))
+            if args.command == "maintain-orders":
+                # No market data, model request, budget gate or cycle slot needed to reduce
+                # outstanding execution risk. An API/model outage must not prevent recovery.
+                recover_orders(
+                    cfg,
+                    store,
+                    adapters,
+                    allow_cancel=mode == "live",
+                    env_file=args.env_file,
+                    check_permissions=True,
+                )
+                print(dumps({"status": "OK", "mode": mode, "unresolved_orders": []}))
+                return 0
             client = OpenAI(
                 api_key=env.OPENAI_API_KEY.get_secret_value(),
                 max_retries=0,
@@ -104,6 +127,9 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         # Never print an SDK exception or Pydantic error containing environment input.
         reason = exc.code if isinstance(exc, SafetyError) else "STARTUP_OR_CONFIGURATION_FAILED"
+        if args.command == "maintain-orders" and reason == "CYCLE_ALREADY_RUNNING":
+            print(dumps({"status": "BUSY", "reason": reason}), flush=True)
+            return 0  # The next maintenance tick will retry without overlapping a trading cycle.
         print(dumps({"status": "FAILED_CLOSED", "reason": reason}), flush=True)
         return 1
     finally:

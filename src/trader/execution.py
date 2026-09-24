@@ -5,7 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
-from trader.coinbase_client import FINAL_STATUSES, CoinbaseAdapter
+from trader.coinbase_client import ACTIVE_STATUSES, FINAL_STATUSES, CoinbaseAdapter
 from trader.config import AppConfig, Mode, active_mode
 from trader.errors import SafetyError
 from trader.portfolio import apply_fills, expected_after_fills, reconcile_actual, seed_ledger
@@ -18,17 +18,18 @@ from trader.schemas import (
     StrategyPosition,
 )
 from trader.storage import Storage
-from trader.util import ZERO, D, decimal, event, step, utcnow
+from trader.util import ZERO, D, decimal, event, step, timestamp, utcnow
 
 Guard = Callable[[OrderIntent], OrderIntent]
 
 
 class Executor(Protocol):
     mode: Mode
+    env_file: Path
 
     def load_ledger(self, actual: AccountState) -> Ledger: ...
     def execute(self, intent: OrderIntent, guard: Guard) -> ExecutionResult: ...
-    def recover(self, intent: OrderIntent) -> ExecutionResult: ...
+    def recover(self, intent: OrderIntent, *, allow_cancel: bool = False) -> ExecutionResult: ...
 
 
 class BaseExecutor:
@@ -165,7 +166,7 @@ class PaperExecutor(BaseExecutor):
         event("paper_execution_verified", intent.cycle_id, self.mode, result=result)
         return result
 
-    def recover(self, intent: OrderIntent) -> ExecutionResult:
+    def recover(self, intent: OrderIntent, *, allow_cancel: bool = False) -> ExecutionResult:
         # Paper effects are committed atomically; no effects exist for a PREPARED-only intent.
         result = ExecutionResult(
             order_id=None,
@@ -214,7 +215,7 @@ class CoinbaseLiveExecutor(BaseExecutor):
             response = adapter.submit(intent)
         except Exception:
             # Never repeat POST, even if discovery returns no matching order (eventual consistency).
-            return self._discover_and_verify(intent)
+            return self._discover_and_verify(intent, allow_cancel=True)
         if response.get("success") is not True:
             # An explicit, well-formed business rejection proves no order was accepted.
             if (
@@ -231,11 +232,11 @@ class CoinbaseLiveExecutor(BaseExecutor):
                 )
                 self.store.record_result(intent, result)
                 return result
-            return self._discover_and_verify(intent)
+            return self._discover_and_verify(intent, allow_cancel=True)
         success = response.get("success_response", {})
         order_id = success.get("order_id")
         if not order_id or success.get("client_order_id") != intent.client_order_id:
-            return self._discover_and_verify(intent)
+            return self._discover_and_verify(intent, allow_cancel=True)
         result = ExecutionResult(
             order_id=order_id,
             status="UNRESOLVED",
@@ -244,7 +245,7 @@ class CoinbaseLiveExecutor(BaseExecutor):
             reason="ACKNOWLEDGED_AWAITING_VERIFICATION",
         )
         self.store.record_result(intent, result)
-        return self._verify(intent, order_id)
+        return self._verify(intent, order_id, allow_cancel=True)
 
     def _unknown(self, intent: OrderIntent, order_id: str | None, reason: str) -> ExecutionResult:
         result = ExecutionResult(
@@ -261,17 +262,67 @@ class CoinbaseLiveExecutor(BaseExecutor):
         )
         return result
 
-    def _discover_and_verify(self, intent: OrderIntent) -> ExecutionResult:
+    def _discover_and_verify(
+        self, intent: OrderIntent, *, allow_cancel: bool = False
+    ) -> ExecutionResult:
         try:
             order = self.adapters[intent.portfolio].find_order(intent)
         except Exception:
             return self._unknown(intent, None, "SUBMISSION_OUTCOME_UNKNOWN")
         if order is None:
             return self._unknown(intent, None, "SUBMISSION_NOT_FOUND_YET")
-        return self._verify(intent, order["order_id"])
+        order_id = order.get("order_id")
+        if not isinstance(order_id, str) or not order_id:
+            return self._unknown(intent, None, "ORDER_IDENTITY_MISMATCH")
+        self._unknown(intent, order_id, "DISCOVERED_AWAITING_VERIFICATION")
+        return self._verify(intent, order_id, allow_cancel=allow_cancel)
 
-    def _verify(self, intent: OrderIntent, order_id: str) -> ExecutionResult:
+    def _cancel_overdue(self, intent: OrderIntent, order: dict) -> str:
+        """Caller has just verified identity via GET. Never cancel arbitrary account orders."""
+        saved, _ = self.store.saved_intent(intent.client_order_id)
+        expected = self.store.exchange(intent.portfolio)
+        if (
+            saved != intent
+            or not expected
+            or (expected["portfolio_id"] != self.adapters[intent.portfolio].portfolio_id)
+        ):
+            raise SafetyError("CANCEL_OWNERSHIP_NOT_VERIFIED")
+        if order["status"] == "CANCEL_QUEUED" or order.get("pending_cancel") is True:
+            return "CANCEL_PENDING"
+        if order.get("pending_cancel") is not False:
+            return "CANCEL_STATE_UNKNOWN"
+        attempts = self.store.cancellations(intent.client_order_id)
+        if len(attempts) >= self.cfg.execution.max_cancel_attempts:
+            return "CANCEL_ATTEMPT_LIMIT"
+        if attempts and (utcnow() - timestamp(attempts[-1]["requested_at"])).total_seconds() < (
+            self.cfg.execution.cancel_retry_seconds
+        ):
+            return "CANCEL_RETRY_COOLDOWN"
+        self.verify_mode(intent)
+        attempt_id = self.store.begin_cancellation(intent, order["order_id"])
+        self.verify_mode(intent)
+        try:
+            accepted = self.adapters[intent.portfolio].cancel(order["order_id"])
+            status = "ACKNOWLEDGED" if accepted else "REJECTED"
+        except Exception:
+            # Cancellation may race a fill or time out. Only a subsequent GET can resolve it.
+            status = "UNKNOWN"
+        self.store.finish_cancellation(attempt_id, status)
+        event(
+            "LIVE_ORDER_CANCELLATION",
+            intent.cycle_id,
+            self.mode,
+            client_order_id=intent.client_order_id,
+            order_id=order["order_id"],
+            status=status,
+        )
+        return "CANCEL_" + status
+
+    def _verify(
+        self, intent: OrderIntent, order_id: str, *, allow_cancel: bool = False
+    ) -> ExecutionResult:
         adapter = self.adapters[intent.portfolio]
+        reason = "ORDER_OR_FILLS_NOT_VERIFIED"
         for attempt in range(self.cfg.execution.verification_attempts):
             try:
                 order = adapter.order(order_id)
@@ -284,27 +335,62 @@ class CoinbaseLiveExecutor(BaseExecutor):
                     or order.get("product_type") != "SPOT"
                 ):
                     return self._unknown(intent, order_id, "ORDER_IDENTITY_MISMATCH")
+                if order.get("status") not in FINAL_STATUSES | set(ACTIVE_STATUSES):
+                    return self._unknown(intent, order_id, "ORDER_STATUS_UNKNOWN")
+                age = (utcnow() - intent.created_at).total_seconds()
+                if order["status"] in ACTIVE_STATUSES:
+                    reason = "ORDER_STILL_OPEN"
+                    if age >= self.cfg.execution.max_order_age_seconds:
+                        reason = (
+                            self._cancel_overdue(intent, order)
+                            if allow_cancel
+                            else "ORDER_OVERDUE_READ_ONLY"
+                        )
+                else:
+                    reason = "ORDER_OR_FILLS_NOT_VERIFIED"
                 fills = adapter.fills(order_id, intent)
                 filled = sum((f.base_size for f in fills), ZERO)
                 fees = sum((f.fee for f in fills), ZERO)
                 value = sum((f.base_size * f.price for f in fills), ZERO)
+                count = decimal(order["number_of_fills"])
+                reported_size = decimal(order["filled_size"])
+                reported_fees = decimal(order["total_fees"])
+                reported_value = decimal(order["filled_value"])
+                if min(count, reported_size, reported_fees, reported_value) < 0 or count % 1:
+                    return self._unknown(intent, order_id, "ORDER_TOTALS_INVALID")
+                if not self.store.order_fill_ids(intent.client_order_id) <= {
+                    f.fill_id for f in fills
+                }:
+                    return self._unknown(intent, order_id, "FILL_HISTORY_MISSING")
                 # Persist all observations, even when they cannot yet be applied to the ledger.
                 self.store.audit(
                     "reconciliation_events",
                     intent.cycle_id,
                     self.mode,
                     order_id,
-                    {"exchange_status": order.get("status"), "observed_fills": fills},
+                    {
+                        "exchange_status": order.get("status"),
+                        "observed_fills": fills,
+                        "verification_reason": reason,
+                    },
                 )
                 if (
                     order.get("status") in FINAL_STATUSES
-                    and abs(filled - decimal(order["filled_size"]))
-                    <= self.cfg.risk.balance_tolerance_base
-                    and abs(fees - decimal(order["total_fees"]))
-                    <= self.cfg.risk.balance_tolerance_quote
-                    and abs(value - decimal(order["filled_value"]))
-                    <= self.cfg.risk.balance_tolerance_quote
-                    and order.get("settled") is True
+                    # Quantity tolerance must never turn a missing dust fill into zero execution.
+                    and count == len(fills)
+                    and (filled > 0) == (reported_size > 0)
+                    and abs(filled - reported_size) <= self.cfg.risk.balance_tolerance_base
+                    and abs(fees - reported_fees) <= self.cfg.risk.balance_tolerance_quote
+                    and abs(value - reported_value) <= self.cfg.risk.balance_tolerance_quote
+                    and (bool(fills) or reported_size == reported_value == reported_fees == 0)
+                    and (
+                        order.get("settled") is True
+                        or (
+                            order.get("settled") is False
+                            and not fills
+                            and reported_size == reported_value == reported_fees == 0
+                        )
+                    )
                     and (filled > 0 or order["status"] != "FILLED")
                 ):
                     if filled > intent.base_size + self.cfg.risk.balance_tolerance_base and not (
@@ -339,12 +425,19 @@ class CoinbaseLiveExecutor(BaseExecutor):
                     )
                     self._settle(intent, result)
                     return result
-            except Exception:
+            except Exception as exc:
                 # Reads may lag fills/settlement. Bound the wait, retaining the original client ID.
-                pass
+                reason = exc.code if isinstance(exc, SafetyError) else "ORDER_RESPONSE_INVALID"
+                self.store.audit(
+                    "reconciliation_events",
+                    intent.cycle_id,
+                    self.mode,
+                    order_id,
+                    {"verification_reason": reason, "attempt": attempt + 1},
+                )
             if attempt + 1 < self.cfg.execution.verification_attempts:
                 time.sleep(self.cfg.execution.verification_delay_seconds * 2 ** min(attempt, 3))
-        return self._unknown(intent, order_id, "ORDER_OR_FILLS_NOT_VERIFIED")
+        return self._unknown(intent, order_id, reason)
 
     def _settle(self, intent: OrderIntent, result: ExecutionResult) -> None:
         ledger = self.store.ledger(self.mode, intent.portfolio)
@@ -371,13 +464,35 @@ class CoinbaseLiveExecutor(BaseExecutor):
         )
         event("live_fills_and_balances_verified", intent.cycle_id, self.mode, result=result)
 
-    def recover(self, intent: OrderIntent) -> ExecutionResult:
-        # Read-only recovery is allowed even if the service has since been switched to paper.
+    def recover(self, intent: OrderIntent, *, allow_cancel: bool = False) -> ExecutionResult:
+        saved, status = self.store.saved_intent(intent.client_order_id)
+        if saved != intent:
+            raise SafetyError("ORDER_INTENT_MISMATCH")
         previous = self.store.result(intent.client_order_id)
+        if status == "PREPARED":
+            if (
+                previous
+                or self.store.order_fill_ids(intent.client_order_id)
+                or self.store.cancellations(intent.client_order_id)
+            ):
+                return self._unknown(
+                    intent, previous.order_id if previous else None, "ORDER_STATE_CONFLICT"
+                )
+            # SUBMITTING is durable before POST. PREPARED alone proves no request was sent.
+            result = ExecutionResult(
+                order_id=None,
+                status="ABORTED",
+                fills=[],
+                terminal=True,
+                reason="INTERRUPTED_BEFORE_SUBMISSION",
+            )
+            self.store.record_result(intent, result)
+            return result
+        # Default recovery remains read-only, including doctor and cross-mode reconciliation.
         return (
-            self._verify(intent, previous.order_id)
+            self._verify(intent, previous.order_id, allow_cancel=allow_cancel)
             if previous and previous.order_id
-            else self._discover_and_verify(intent)
+            else self._discover_and_verify(intent, allow_cancel=allow_cancel)
         )
 
 
@@ -395,10 +510,33 @@ def make_executor(
     raise SafetyError("INVALID_TRADING_MODE")
 
 
-def recover_orders(cfg: AppConfig, store: Storage, adapters: dict[str, CoinbaseAdapter]) -> None:
-    """Read-only recovery for both modes. Unresolved live work also blocks paper trading."""
+def recover_orders(
+    cfg: AppConfig,
+    store: Storage,
+    adapters: dict[str, CoinbaseAdapter],
+    *,
+    allow_cancel: bool = False,
+    env_file: Path = Path(".env"),
+    check_permissions: bool = False,
+) -> None:
+    """No new orders. Optional live-only cancellation after fresh ownership/state checks."""
+    unresolved = False
     for intent in store.unresolved():
-        executor = make_executor(intent.mode, cfg, store, adapters)
-        result = executor.recover(intent)
-        if not result.terminal:
-            raise SafetyError("UNRESOLVED_PREVIOUS_ORDER")
+        try:
+            if check_permissions:
+                adapters[intent.portfolio].check_permissions(active_mode(env_file))
+            executor = make_executor(intent.mode, cfg, store, adapters, env_file)
+            result = executor.recover(intent, allow_cancel=allow_cancel)
+            unresolved |= not result.terminal
+        except Exception as exc:
+            unresolved = True
+            event(
+                "order_recovery_failed",
+                intent.cycle_id,
+                intent.mode,
+                client_order_id=intent.client_order_id,
+                reason=exc.code if isinstance(exc, SafetyError) else "ORDER_RECOVERY_FAILED",
+            )
+        # One bad portfolio must not prevent another owned order from being recovered/cancelled.
+    if unresolved:
+        raise SafetyError("UNRESOLVED_PREVIOUS_ORDER")

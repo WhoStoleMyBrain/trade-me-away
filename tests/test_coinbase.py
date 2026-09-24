@@ -133,3 +133,69 @@ def test_quote_denominated_fills_are_converted_once(adapter, sdk, intent):
     from trader.util import D
 
     assert fills[0].base_size == D("0.5")
+
+
+def test_fee_assumption_must_cover_exchange_tier(adapter, sdk, cfg):
+    adapter.check_fee_rate(cfg.execution.taker_fee_rate)
+    sdk.get_transaction_summary.assert_called_once_with(product_type="SPOT")
+    sdk.get_transaction_summary.return_value["fee_tier"]["taker_fee_rate"] = "0.012"
+    with pytest.raises(SafetyError, match="FEE_RATE_UNDERESTIMATED"):
+        adapter.check_fee_rate(cfg.execution.taker_fee_rate)
+
+
+@pytest.mark.parametrize(
+    "fee_state",
+    [
+        {"has_cost_plus_commission": True},
+        {"has_cost_plus_commission": None},
+        {"goods_and_services_tax": {"rate": "0.1", "type": "EXCLUSIVE"}},
+    ],
+)
+def test_special_or_unknown_fees_fail_closed(adapter, sdk, cfg, fee_state):
+    sdk.get_transaction_summary.return_value.update(fee_state)
+    with pytest.raises(SafetyError, match="UNSUPPORTED_FEE_SCHEDULE"):
+        adapter.check_fee_rate(cfg.execution.taker_fee_rate)
+
+
+def test_official_cancel_sdk_http_contract(monkeypatch):
+    from coinbase.rest import RESTClient
+
+    from trader.coinbase_client import CoinbaseAdapter
+
+    client = RESTClient(api_key="unit-test-unused", api_secret="unit-test-unused", timeout=15)
+    monkeypatch.setattr(client, "set_headers", lambda *_: {})
+    response = requests.Response()
+    response.status_code = 200
+    response._content = b'{"results":[{"order_id":"owned-id","success":true}]}'
+    request = Mock(return_value=response)
+    monkeypatch.setattr(client.session, "request", request)
+    assert CoinbaseAdapter(client, "main", "test-portfolio").cancel("owned-id") is True
+    assert request.call_args.args == (
+        "POST",
+        "https://api.coinbase.com/api/v3/brokerage/orders/batch_cancel",
+    )
+    assert request.call_args.kwargs["json"] == {"order_ids": ["owned-id"]}
+    request.assert_called_once()
+    client.session.close()
+
+
+def test_official_fee_sdk_http_contract(monkeypatch, cfg):
+    from coinbase.rest import RESTClient
+
+    from trader.coinbase_client import CoinbaseAdapter
+
+    client = RESTClient(api_key="unit-test-unused", api_secret="unit-test-unused", timeout=15)
+    monkeypatch.setattr(client, "set_headers", lambda *_: {})
+    response = requests.Response()
+    response.status_code = 200
+    response._content = b'{"fee_tier":{"taker_fee_rate":"0.006"},"has_cost_plus_commission":false}'
+    request = Mock(return_value=response)
+    monkeypatch.setattr(client.session, "request", request)
+    CoinbaseAdapter(client, "main", "test-portfolio").check_fee_rate(cfg.execution.taker_fee_rate)
+    request.assert_called_once()
+    assert request.call_args.args == (
+        "GET",
+        "https://api.coinbase.com/api/v3/brokerage/transaction_summary",
+    )
+    assert request.call_args.kwargs["params"] == {"product_type": "SPOT"}
+    client.session.close()

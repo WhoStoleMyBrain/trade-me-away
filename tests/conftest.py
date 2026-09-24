@@ -194,6 +194,10 @@ def sdk(actual):
         "can_transfer": False,
         "portfolio_uuid": "test-portfolio",
     }
+    client.get_transaction_summary.return_value = {
+        "fee_tier": {"taker_fee_rate": "0.006"},
+        "has_cost_plus_commission": False,
+    }
     account_state = {"value": actual}
 
     def accounts(**kwargs):

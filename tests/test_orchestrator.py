@@ -63,7 +63,7 @@ def test_hold_cycle_has_no_orders(cfg, store, adapter, sdk, openai_mock):
 
 
 @pytest.mark.parametrize(
-    "problem", ["candles", "balance", "open_order", "stale", "permission", "budget"]
+    "problem", ["candles", "balance", "open_order", "stale", "permission", "budget", "fees"]
 )
 def test_preflight_failures_skip_openai(cfg, store, adapter, sdk, actual, openai_mock, problem):
     app = service(cfg, store, adapter, openai_mock)
@@ -105,6 +105,8 @@ def test_preflight_failures_skip_openai(cfg, store, adapter, sdk, actual, openai
         }
     elif problem == "permission":
         sdk.get_api_key_permissions.return_value["portfolio_uuid"] = "wrong"
+    elif problem == "fees":
+        sdk.get_transaction_summary.return_value["fee_tier"]["taker_fee_rate"] = "0.012"
     else:
         store.reserve_request("spent", "past", cfg.llm, cfg.llm.daily_budget_usd, NOW)
     with pytest.raises(SafetyError):
@@ -138,6 +140,42 @@ def test_preexecution_price_move_aborts_without_second_model_call(
     assert not store.rows("orders")
     assert openai_mock.responses.create.call_count == 1
     assert any("PRICE_MOVED" in r["payload_json"] for r in store.rows("risk_results"))
+
+
+@pytest.mark.parametrize("mode", ["paper", "live"])
+def test_fee_increase_after_decision_prevents_submission(
+    cfg,
+    store,
+    adapter,
+    sdk,
+    openai_mock,
+    monkeypatch,
+    mode,
+):
+    from trader.execution import make_executor
+
+    monkeypatch.setenv("TRADING_MODE", mode)
+    response = openai_mock.responses.create.return_value
+
+    def changed_fee(**kwargs):
+        sdk.get_transaction_summary.return_value["fee_tier"]["taker_fee_rate"] = "0.012"
+        return response
+
+    openai_mock.responses.create.side_effect = changed_fee
+    adapters = {"main": adapter}
+    app = Orchestrator(
+        cfg,
+        mode,
+        store,
+        MarketData(cfg, adapters, store),
+        DecisionClient(openai_mock, cfg.llm, store),
+        make_executor(mode, cfg, store, adapters),
+    )
+    with pytest.raises(SafetyError, match="FEE_RATE_UNDERESTIMATED"):
+        app.run()
+    assert openai_mock.responses.create.call_count == 1
+    assert not store.rows("order_intents")
+    sdk.limit_order_ioc.assert_not_called()
 
 
 def test_scheduled_late_restart_is_rejected():
@@ -221,6 +259,8 @@ def test_complete_live_cycle_uses_same_pipeline_with_mocked_orders(
             "retail_portfolio_id": "test-portfolio",
             "product_type": "SPOT",
             "status": "FILLED",
+            "number_of_fills": "1",
+            "pending_cancel": False,
             "settled": True,
             "filled_size": base_size,
             "filled_value": str(size * price),

@@ -136,6 +136,11 @@ class ExecutionConfig(ConfigModel):
     paper_fill_fraction: Fraction = D("1")
     verification_attempts: int = Field(default=5, ge=1, le=10)
     verification_delay_seconds: float = Field(default=1, ge=0, le=5)
+    coinbase_timeout_seconds: int = Field(default=15, ge=1, le=60)
+    # IOC is exchange-enforced. This deadline is a backstop for anomalously open orders.
+    max_order_age_seconds: int = Field(default=120, ge=30, le=86400)
+    cancel_retry_seconds: int = Field(default=60, ge=30, le=3600)
+    max_cancel_attempts: int = Field(default=3, ge=1, le=10)
 
 
 class Pricing(ConfigModel):

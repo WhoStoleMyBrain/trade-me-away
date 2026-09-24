@@ -31,6 +31,8 @@ flowchart TD
     Paper --> Ledger[Atomic accounting and portfolio reconciliation]
     Live --> Ledger
     Ledger --> DB[(SQLite audit and strategy state)]
+    Watch[systemd order recovery every minute] --> Recover[Verify original orders; cancel overdue owned orders in live mode]
+    Recover --> Ledger
 ```
 
 The same orchestrator, schema, prompt, risk engine, and pre-execution refresh serve both modes.
@@ -71,8 +73,9 @@ python -m trader show-costs
 ```
 
 `doctor` prints **TRADING MODE: PAPER** and checks configuration, database integrity/access, Coinbase
-key permissions, product availability, portfolio mappings, actual account reconciliation, unresolved
-orders, cost budgets, and OpenAI model access. It places no order and makes no generation request.
+key permissions, fee assumptions, product availability, portfolio mappings, actual account
+reconciliation, unresolved orders, cost budgets, and OpenAI model access. It places no order and
+makes no generation request.
 It may establish initial balance baselines or recover previously submitted orders through GETs.
 It cannot prove that your account supports a particular model/reasoning/schema combination without
 making a generation request; the first paper cycle exercises that path.
@@ -121,7 +124,7 @@ Important configuration groups:
 | `assets` | Any number of enabled spot `BASE-USDC` products mapped to portfolios |
 | `market.candles` | Coinbase granularity and 80–350 bars per timeframe; required horizon coverage validated |
 | `risk` | Exposure, order size, daily attempts/loss, cooldown, freshness, spread, confidence and movement limits |
-| `execution` | IOC order type, configured taker fees, slippage, limit offset, simulated fill fraction, verification waits |
+| `execution` | IOC type, fee allowance, slippage, limit offset, simulated fill fraction, HTTP timeout, verification and cancellation limits |
 | `llm` | Model, reasoning effort, token/payload limits, bounded attempts, pricing and daily/monthly USD budgets |
 | `TRADER_DB` | SQLite location; defaults to `var/trader.sqlite3` |
 
@@ -172,6 +175,12 @@ reconciles again, checks decision age/price movement, and repeats risk checks. I
 but cannot expand it. It never asks the model again in response to changed conditions. A failed
 refresh aborts the rest of that cycle.
 
+Every account refresh also reads Coinbase's current spot taker fee tier. The configured
+`execution.taker_fee_rate` must be at least that rate; a lower assumption blocks both paper and live
+trading before sizing. Unknown fee schedules, cost-plus commissions, and nonzero GST currently fail
+closed because their complete commission semantics are not implemented. Set a conservative fee
+allowance and review your actual account tier; the example's 0.6% is not a universal Coinbase rate.
+
 The actual Coinbase balance checkpoint remains separate from both strategy ledgers. After initial
 bootstrap, external deposits, withdrawals, manual trades, unexpected holdings, mapping changes,
 or material discrepancies block trading in **both** modes. Unknown recent fills also block trading,
@@ -190,7 +199,7 @@ copying only the main file while WAL writes are active.
 Paper execution models the current bid/ask, configured per-side slippage, taker commission, IOC
 marketability, and a deterministic `paper_fill_fraction`. An unfilled IOC remainder is cancelled;
 there are no simulated resting orders. It does not model order-book depth, queue priority, or market
-impact. Fees are configurable estimates, not fetched fee-tier guarantees.
+impact. Simulation uses the configured fee allowance, checked against the current reported fee tier.
 
 Default `limit_ioc` maps to the official SDK's `limit_order_ioc` (`sor_limit_ioc`). The limit is a
 local bound around the refreshed bid/ask. `market_ioc` is an explicit option; market buys spend a
@@ -205,18 +214,62 @@ If discovery is empty, the result stays unresolved because absence is not proof 
 [Coinbase client-order-ID contract](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/orders/create-order).
 
 An acknowledgment is not success. Live execution compares order identity, terminal/settled state,
-filled quantity, value and fees with individually fetched fills, detects partial/cancelled/rejected
+fill count, quantity, value and fees with individually fetched fills, detects partial/cancelled/rejected
 orders, commits fills once, and verifies resulting Coinbase balances. Delayed settlement or unknown
-outcomes block subsequent orders and future cycles. Recovery checks the original order only, even
-if the process has since switched to paper. It never resubmits or cancels an external order.
+outcomes block subsequent orders and future cycles. A terminal zero-fill cancellation may report
+`settled=false`: it is resolved only when all execution totals/count are exactly zero, the fill list
+is empty, balances match and holds/open orders have cleared. Executed trades still require settlement.
+
+### Unfilled orders, deadlines and cancellation
+
+Both **BUY and SELL use immediate-or-cancel (IOC)**, for both supported order types. Coinbase cancels
+any unfilled remainder immediately; the application does not place resting GTC orders. A one-hour
+or one-day lifetime would serve a different strategy and is not needed here.
+[Coinbase time-in-force rules](https://help.coinbase.com/en/coinbase/trading-and-funding/advanced-trade/order-types).
+
+HTTP timeouts do **not** cancel exchange orders. These controls have separate purposes:
+
+| Setting / job | Default | Purpose |
+|---|---|---|
+| `execution.coinbase_timeout_seconds` | 15 seconds | SDK HTTP timeout; a submission timeout leaves the outcome uncertain |
+| `execution.max_order_age_seconds` | 120 seconds | Cancel a verified strategy order still open after this age, measured from persisted intent creation |
+| `execution.cancel_retry_seconds` | 60 seconds | Minimum interval between cancellation requests, always after another state/identity read |
+| `execution.max_cancel_attempts` | 3 per order | Bound cancellation attempts across restarts; verification continues after the cap |
+| `crypto-trader-orders.timer` | 60 seconds after each check completes | Recover unresolved orders between three-hour decision cycles and after reboot |
+
+Install **both timers** below for unattended use. The recovery job runs
+`python -m trader maintain-orders`. It takes the same process lock, never calls OpenAI, never creates a new order, and
+does not depend on model connectivity, API budgets, market indicators, or a trading-cycle slot.
+With no unresolved intent it has no exchange work to do. Run it manually for a one-off recovery check.
+
+In exact `TRADING_MODE=live`, maintenance and trading-cycle recovery may cancel an overdue order only
+after a fresh GET confirms its saved client ID, exchange ID, product, side, spot type and portfolio.
+Each cancellation attempt is durable before the request. A cancellation acknowledgment or timeout
+does not release local funds or mark the order complete: further GETs must confirm terminal status,
+all fills/fees (including fills racing the cancellation), matching balances and released holds.
+Cancellation retries target the same exchange ID, never create a replacement, and skip pending
+cancellations. Manual/external orders are never automatically cancelled.
+[Coinbase cancellation API](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/orders/cancel-order).
+
+`doctor`, `reconcile`, and maintenance in paper mode remain read-only at Coinbase. Switching to paper
+does not cancel an existing live order. Recovery can still verify it, and an unresolved live order
+blocks both modes. A PREPARED-only intent is safely aborted because the durable SUBMITTING transition
+must precede any network submission; an uncertain submission can never be cleared merely by age or
+an empty discovery result.
+
+The two-minute deadline triggers a **best-effort cancellation request**, not a guaranteed release
+time. Timer cadence, an active trading lock, exchange settlement delays, outages, or a stopped host
+can extend it. IOC remains exchange-enforced when the host is offline. Exhausted cancellation
+attempts or unresolved outcomes require inspecting the original order in Coinbase; never delete its
+history or submit a replacement to clear the block.
 
 After paper testing and reviewing the database, fees and risk limits:
 
-1. Stop the timer/service if installed; confirm no order outcome remains unresolved.
+1. Confirm no order outcome remains unresolved, then stop both timers/services if installed.
 2. Change **only** `.env` to `TRADING_MODE=live` (assuming the key already has view+trade permissions).
    Remove a conflicting shell/service environment override if present.
 3. Run `python -m trader doctor`. It prints **TRADING MODE: LIVE — REAL ORDERS ENABLED**.
-4. In a fresh cycle slot, run `python -m trader run`, or restart the timer to wait for its next trigger.
+4. In a fresh cycle slot, run `python -m trader run`, or restart both timers.
 
 Live uses actual Coinbase cash/holdings, not the paper balance. Switching back to `paper` selects
 the existing paper ledger again. Switching mode does not bypass unresolved-order recovery.
@@ -228,7 +281,8 @@ There is one logical joint decision request per cycle. Normally that is one HTTP
 transport failures, 429s, or 5xx errors may cause bounded retries of the same payload. Each attempt
 is logged and reserved against the budget. Schema failures, refusals and incomplete output are not
 retried. Safe Coinbase GETs use three attempts with exponential backoff; order POSTs never use that
-retry helper. SDK automatic OpenAI retries are disabled.
+retry helper. Cancellation has a separate persisted, bounded policy requiring fresh order-state
+verification before another attempt. SDK automatic OpenAI retries are disabled.
 
 The stable instruction prefix is separate from dynamic state. Prompt caching may apply but is not
 assumed. Conservative preflight reserves UTF-8 byte count plus framing as an input-token upper bound
@@ -251,22 +305,27 @@ are ignored by Git. Files created by the CLI use a restrictive umask.
 
 Tables include `trading_cycles`, `market_snapshots`, `computed_features`, `portfolio_snapshots`,
 `model_requests`, `model_decisions`, `risk_results`, `order_intents`, `orders`, `fills`,
-`strategy_state`, `api_usage`, `exchange_state`, `daily_marks`, and `reconciliation_events`.
+`strategy_state`, `api_usage`, `exchange_state`, `daily_marks`, `reconciliation_events`, and
+`cancellation_attempts`. Database schema v1 upgrades to v2 without removing history.
 Domain payloads are JSON; monetary values are decimal strings. Times are UTC. Orders and fills are
 mode-tagged. A cycle ID connects all activity. Inspection commands work offline without Coinbase
 connectivity; trading, doctor, and reconciliation perform startup checks.
 
 ```bash
 python -m trader reconcile
+python -m trader maintain-orders
 sqlite3 var/trader.sqlite3 'SELECT cycle_id, mode, status, reason FROM trading_cycles;'
 sqlite3 var/trader.sqlite3 'SELECT subject, payload_json FROM risk_results ORDER BY id DESC LIMIT 10;'
 sqlite3 var/trader.sqlite3 'SELECT mode, status, order_id FROM orders;'
 journalctl -u crypto-trader.service -n 100
+journalctl -u crypto-trader-orders.service -n 100
 ```
 
 An abrupt crash can leave a cycle marked RUNNING. The claimed slot prevents replay; the next fresh
-slot performs order recovery before new trading. Nonterminal exchange orders are observed through
-bounded polling; the service does not wait indefinitely or place replacement orders.
+slot performs order recovery before new trading. The separate recovery timer can reconcile and
+cancel overdue owned orders before that next slot. Nonterminal orders use bounded polling; the
+service does not wait indefinitely or place replacement orders. `show-orders` includes cancellation
+attempts and outstanding verification reasons.
 
 ## systemd installation
 
@@ -280,10 +339,12 @@ sudo chown root:crypto-trader /opt/crypto-trader/.env
 sudo chmod 0640 /opt/crypto-trader/.env
 sudo install -m 0644 deploy/systemd/crypto-trader.service /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/crypto-trader.timer /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/crypto-trader-orders.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/crypto-trader-orders.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo -u crypto-trader /opt/crypto-trader/.venv/bin/python -m trader doctor
-sudo systemctl enable --now crypto-trader.timer
-systemctl list-timers crypto-trader.timer
+sudo systemctl enable --now crypto-trader.timer crypto-trader-orders.timer
+systemctl list-timers 'crypto-trader*'
 ```
 
 Run the doctor command from `/opt/crypto-trader`; ensure that user can read the installed code,
@@ -292,7 +353,11 @@ keys use the same parsing as the CLI. Only `var/` is writable under the hardened
 
 The timer runs at 00:05, 03:05, …, 21:05 **UTC**. `Persistent=false` prevents catching up missed
 triggers. `run --scheduled` also rejects launches outside boundary +5 through +20 minutes. There
-are no failure-triggered restarts. On a restart the timer waits for the next future trigger.
+are no failure-triggered trading restarts. On a restart the trading timer waits for its next future
+trigger. The order-recovery timer starts after boot and runs 60 seconds after its previous check
+finishes, without scheduling a model decision. It reports BUSY and waits for its next tick if another
+command holds the lock. Its five-minute service limit bounds a hung check; durable intent/cancellation
+records allow the next check to resume verification safely. Monitor both services' failed statuses.
 
 ## Adding another cryptocurrency or portfolio
 
@@ -317,11 +382,15 @@ outside the enabled universe cannot be safely valued and block trading.
 | `CONFIGURATION_INVALID` | Check YAML fields, model/pricing match, candle coverage and missing placeholder values; raw config is intentionally not printed |
 | `COINBASE_PORTFOLIO_PERMISSION_MISMATCH` | Verify the CDP key's actual portfolio UUID and view permission |
 | `COINBASE_TRANSFER_PERMISSION_ENABLED_OR_UNKNOWN` | Use a key without transfer permission |
+| `FEE_RATE_UNDERESTIMATED` | Raise the configured fee allowance to cover your verified current tier; do not lower the exchange check |
+| `UNSUPPORTED_FEE_SCHEDULE` | Inspect cost-plus/GST or missing fee metadata; current implementation cannot safely size that schedule |
 | `PRODUCT_IDENTITY_OR_TYPE_MISMATCH` / `PRODUCT_NOT_TRADABLE` | Verify regional product availability; USD aliases are never silently substituted for USDC |
 | `CANDLE_DATA_INSUFFICIENT_OR_INVALID` / `STALE_QUOTE` | Check connectivity, host time and candle publication; do not fill missing data artificially |
 | `COINBASE_HISTORY_AUTHENTICATION_REQUIRED` | Coinbase requires additional history authentication, including possible EU SCA; resolve account access before trading |
 | `RECONCILIATION_FAILED` | Inspect reconciliation reasons and actual exchange activity; restore consistency through an audited operator review |
-| `UNRESOLVED_PREVIOUS_ORDER` / `UNRESOLVED_EXECUTION` | Inspect the original client/exchange order IDs and run `reconcile`; never submit a replacement |
+| `UNRESOLVED_PREVIOUS_ORDER` / `UNRESOLVED_EXECUTION` | Inspect original IDs and run `maintain-orders` (live may cancel overdue owned orders) or read-only `reconcile`; never submit a replacement |
+| `CANCEL_ATTEMPT_LIMIT` / `CANCEL_PENDING` | Inspect the original order and held funds in Coinbase; the service keeps verifying but does not blindly send more cancellations |
+| `FILL_HISTORY_MISSING` | Inspect fill pagination/history access and prior audit records; previously accounted fills cannot disappear from a verified snapshot |
 | `API_BUDGET_EXCEEDED` | Inspect actual usage and retained reservations; wait for the budget window or explicitly review limits |
 | `DUPLICATE_CYCLE` / `CYCLE_ALREADY_RUNNING` | Wait for the next slot or existing process; do not remove the live lock/database |
 
@@ -346,5 +415,6 @@ ruff format --check .
 Tests block outbound socket connections and replace Coinbase/OpenAI calls. Coverage prioritizes
 malformed/stale/missing data, look-ahead prevention, schema rejection, sizing and limits, reconciliation,
 locks, duplicate cycles/orders, API budgets/failures, uncertain submission, partial/rejected fills,
-mode changes, recovery accounting, and complete joint paper cycles. Tests never require real keys
-and never place a real trade.
+mode changes, cancellation races/timeouts/held funds, missing tiny fills, fee-tier changes,
+recovery accounting, and complete joint paper/live cycles with mocked exchanges. Tests never require
+real keys and never place a real trade.

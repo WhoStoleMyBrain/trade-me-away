@@ -56,10 +56,15 @@ risk:
 
 execution:
   order_type: limit_ioc
-  # Illustrative conservative assumptions; set these to your actual Coinbase fee tier.
+  # Must cover the current Coinbase taker tier (checked on every account refresh).
   taker_fee_rate: "0.006"
   slippage_bps: "5"
   limit_offset_bps: "10"
   paper_fill_fraction: "1"
   verification_attempts: 5
   verification_delay_seconds: 1
+  # HTTP wait and order lifetime are different. Both buy/sell orders remain IOC.
+  coinbase_timeout_seconds: 15
+  max_order_age_seconds: 120
+  cancel_retry_seconds: 60
+  max_cancel_attempts: 3

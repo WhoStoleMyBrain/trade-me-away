@@ -1,0 +1,21 @@
+[Unit]
+Description=Recover and cancel overdue strategy orders (no new trades)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=crypto-trader
+Group=crypto-trader
+WorkingDirectory=/opt/crypto-trader
+ExecStart=/opt/crypto-trader/.venv/bin/python -m trader maintain-orders
+TimeoutStartSec=5min
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/crypto-trader/var
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StandardOutput=journal
+StandardError=journal

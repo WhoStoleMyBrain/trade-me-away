@@ -61,10 +61,16 @@ class Orchestrator:
             )
         return states
 
-    def startup(self, cycle: str) -> None:
+    def startup(self, cycle: str, *, allow_cancel: bool = False) -> None:
         for adapter in self.market.adapters.values():
             adapter.check_permissions(self.mode)
-        recover_orders(self.cfg, self.store, self.market.adapters)
+        recover_orders(
+            self.cfg,
+            self.store,
+            self.market.adapters,
+            allow_cancel=allow_cancel and self.mode == "live",
+            env_file=self.executor.env_file,
+        )
         refreshed, actual = self.market.refresh()
         for product, _ in refreshed.values():
             if not product.tradable or (
@@ -86,7 +92,7 @@ class Orchestrator:
         self.store.begin_cycle(cycle, cycle_slot(start), self.mode, self.cfg, start)
         event("cycle_started", cycle, self.mode)
         try:
-            self.startup(cycle)
+            self.startup(cycle, allow_cancel=True)
             markets, actual = self.market.snapshot(cycle, self.mode)
             states = self.portfolios(
                 actual, {p: m.quote for p, m in markets.items()}, cycle, "decision"

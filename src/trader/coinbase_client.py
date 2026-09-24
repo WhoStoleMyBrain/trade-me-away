@@ -11,7 +11,7 @@ from coinbase.rest import RESTClient
 from trader.config import AppConfig, Mode, required_secret
 from trader.errors import SafetyError
 from trader.schemas import AccountState, Balance, Fill, OrderIntent, Product, Quote
-from trader.util import ZERO, decimal, safe_read, timestamp, utcnow
+from trader.util import ZERO, D, decimal, safe_read, timestamp, utcnow
 
 ACTIVE_STATUSES = ["OPEN", "PENDING", "QUEUED", "CANCEL_QUEUED"]
 FINAL_STATUSES = {"FILLED", "CANCELLED", "EXPIRED", "FAILED", "REJECTED"}
@@ -43,6 +43,20 @@ class CoinbaseAdapter:
             raise SafetyError("COINBASE_TRANSFER_PERMISSION_ENABLED_OR_UNKNOWN")
         if mode == "live" and p.get("can_trade") is not True:
             raise SafetyError("COINBASE_TRADE_PERMISSION_MISSING")
+
+    def check_fee_rate(self, assumed_rate: D) -> None:
+        data = self.read("get_transaction_summary", product_type="SPOT")
+        rate = decimal(data["fee_tier"]["taker_fee_rate"])
+        if not ZERO <= rate <= 1:
+            raise SafetyError("COINBASE_FEE_RATE_INVALID")
+        # Do not guess how special commission schedules or taxes affect the quoted tier.
+        tax = data.get("goods_and_services_tax")
+        if data.get("has_cost_plus_commission") is not False or (
+            tax is not None and decimal(tax["rate"]) != ZERO
+        ):
+            raise SafetyError("UNSUPPORTED_FEE_SCHEDULE")
+        if assumed_rate < rate:
+            raise SafetyError("FEE_RATE_UNDERESTIMATED")
 
     def pages(self, method: str, key: str, **kwargs: Any) -> list[dict]:
         result: list[dict] = []
@@ -237,6 +251,20 @@ class CoinbaseAdapter:
             raise SafetyError("DUPLICATE_EXCHANGE_CLIENT_ID")
         return matches[0] if matches else None
 
+    def cancel(self, order_id: str) -> bool:
+        """One cancellation request for a verified owned order; an ACK is not finality."""
+        with self._lock:
+            data = plain(self.client.cancel_orders(order_ids=[order_id]))
+        results = data.get("results")
+        if (
+            not isinstance(results, list)
+            or len(results) != 1
+            or results[0].get("order_id") != order_id
+            or type(results[0].get("success")) is not bool
+        ):
+            raise SafetyError("CANCEL_RESPONSE_INVALID")
+        return results[0]["success"]
+
     def order(self, order_id: str) -> dict:
         data = self.read("get_order", order_id=order_id)
         if not isinstance(data.get("order"), dict):
@@ -290,7 +318,7 @@ def build_adapters(cfg: AppConfig, values: dict[str, str | None]) -> dict[str, C
         client = RESTClient(
             api_key=required_secret(values, portfolio.api_key_env),
             api_secret=required_secret(values, portfolio.api_secret_env).replace("\\n", "\n"),
-            timeout=15,
+            timeout=cfg.execution.coinbase_timeout_seconds,
             verbose=False,
         )
         adapters[name] = CoinbaseAdapter(client, name, portfolio_id)

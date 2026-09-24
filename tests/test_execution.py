@@ -42,6 +42,8 @@ def exchange_fill(
         "filled_size": size,
         "filled_value": str(D(size) * D(price)),
         "total_fees": fee,
+        "number_of_fills": "1" if D(size) else "0",
+        "pending_cancel": False,
     }
     sdk.limit_order_ioc.return_value = {
         "success": True,
@@ -56,8 +58,12 @@ def exchange_fill(
     sdk.get_fills.return_value = {"fills": [fill] if D(size) else [], "cursor": ""}
     old = sdk.account_state["value"]
     balances = dict(old.balances)
-    balances["BTC"] = Balance(available=D(size), hold=D("0"))
-    balances["USDC"] = Balance(available=D("1000") - D(size) * D(price) - D(fee), hold=D("0"))
+    base = intent.product_id.split("-")[0]
+    sign = D("1") if intent.side == "BUY" else D("-1")
+    balances[base] = Balance(available=old.balances[base].total + sign * D(size), hold=D("0"))
+    balances["USDC"] = Balance(
+        available=old.balances["USDC"].total - sign * D(size) * D(price) - D(fee), hold=D("0")
+    )
     sdk.account_state["value"] = old.model_copy(update={"balances": balances})
     return order, fill
 

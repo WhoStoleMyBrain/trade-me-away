@@ -33,7 +33,9 @@ testing, not authenticated exchange certification.
 | [Best bid/ask](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/products/get-best-bid-ask) | Exact product, two-sided book and exchange timestamp required |
 | [Candles](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/products/get-product-candles) | Epoch start/end, official granularity enum, at most 350 bars/request |
 | [Create order](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/orders/create-order) | Unique persisted client ID; duplicate ID returns existing order; CDP key determines portfolio |
-| [Get order](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/orders/get-order) | Match identity, status, settled flag, filled size/value and fees |
+| [Get order](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/orders/get-order) | Match identity, status, settled flag, number of fills, filled size/value and fees; inspect pending cancellation |
+| [Cancel orders](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/orders/cancel-order) | `cancel_orders(order_ids=[owned_id])`, POST `/orders/batch_cancel`; per-order success acknowledges initiation only |
+| [Fee summary](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/fees/get-transaction-summary) | `get_transaction_summary(product_type="SPOT")`; configured allowance must cover `fee_tier.taker_fee_rate`; special/unknown commission schedules fail closed |
 | [List orders](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/orders/list-orders) | Paginate active orders; discover ambiguous submissions by client ID in history |
 | [Fills](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/orders/list-fills) | Order-filtered pagination, entry IDs, price, size, `size_in_quote`, commission and trade timestamp |
 
@@ -42,14 +44,27 @@ Market buy uses quote size; market sell uses base size. Neither call includes po
 leverage, margin, or derivative fields. Product aliases are not silently converted into a different
 quote currency.
 
+IOC applies to buys and sells; the exchange cancels the unfilled remainder immediately.
+[Official order types](https://help.coinbase.com/en/coinbase/trading-and-funding/advanced-trade/order-types).
+The default 15-second SDK HTTP timeout is independent of time-in-force. The 120-second local order
+age backstop asks to cancel a verified owned order still open, with a separate minute-scale recovery
+timer; it cannot promise exchange release by a fixed wall-clock deadline. SDK cancellation and fee
+summary signatures were inspected locally; cancellation's HTTP payload is tested using the official
+SDK with a mocked transport.
+
 Fills can use quote-denominated size, which is converted to base with Decimal price. Cursor-only fill
 pagination is followed until exhaustion, with repeated-cursor/page caps failing closed. Coinbase
 documents unstable fill pagination; inconsistent totals remain unresolved until a later consistent
 read. `proof_token_required` blocks trading instead of treating inaccessible history as empty.
 
 No automatic resubmission policy is enabled: even an empty history query cannot establish that an
-ambiguous POST was never received. Recovery is read-only and preserves the original client ID.
-Unexpected state requires investigation, never an alternative order.
+ambiguous POST was never received. Recovery preserves the original client ID and never creates an
+order. Only live trading/maintenance can request cancellation, with identity/portfolio verification,
+durable attempt recording, cooldown, bounded attempts, and fresh state verification before any retry.
+`doctor`, `reconcile` and paper maintenance only read Coinbase. Cancellation ACKs are not finality:
+fills may race cancellation, and holds must clear before reconciliation succeeds. An entirely unfilled
+terminal order may have `settled=false`; exact zero totals/count, no fills, matching balances and no
+holds/open orders are all required. Any executed amount still requires `settled=true`.
 
 ## Deliberate initial limits
 
@@ -59,6 +74,9 @@ Unexpected state requires investigation, never an alternative order.
   Regional aliases, key access, SCA, fee currency/tier and settlement latency need real account checks.
 - Fees are assumed to be in quote currency, as represented by order/fill commission totals. A balance
   mismatch, unexpected fee accounting, negative available cash or changed fill data blocks trading.
+- The spot tier is fetched on each account refresh, before model use and before execution in both
+  modes. A missing cost-plus flag, cost-plus commissions, or nonzero GST blocks new trading rather
+  than assuming an unverified all-in fee formula. This gate does not prevent owned-order maintenance.
 - Paper fees/slippage and fixed partial-fill fractions are transparent scenarios, not depth/queue models.
 - Six-day maximum gap between reconciliation observations bounds the seven-day history window.
   There is no automatic rebasing tool for external balance changes or an unknown order outcome.

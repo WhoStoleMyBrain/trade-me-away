@@ -23,6 +23,13 @@
   Uncertain outcomes require reconciliation before any further trading. Never blindly retry a POST
   or submit an alternative order after a timeout. A missing discovery result is not proof of absence.
 - Verify order state, fills, fees and post-trade balances. An acknowledgment is never a fill.
+- Keep IOC for buys and sells. HTTP timeout is not order expiry. Overdue cancellation requires exact
+  live mode, a durable owned intent, fresh order identity/portfolio checks, and durable bounded attempts.
+  A cancel acknowledgment is not finality; verify racing fills and released holds. Never cancel external
+  orders or automatically replace them. Keep doctor/reconcile and paper maintenance read-only at Coinbase.
+- Order maintenance must run without OpenAI, cost-budget approval, or a fresh strategy decision, and
+  share the trading process lock. Never treat elapsed time or an empty lookup as proof of no submission.
+- Validate configured fee allowances against the current exchange tier in both modes before sizing.
 - Preserve atomic fill/ledger accounting, mode separation, UTC timestamps, locking, and cycle uniqueness.
 - Never add withdrawals, transfers, leverage, borrowing, futures or derivatives unless explicitly
   requested in a future task.
