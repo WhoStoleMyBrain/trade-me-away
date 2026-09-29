@@ -41,4 +41,6 @@
   requested in a future task.
 - Verify current official API docs and installed SDK signatures before changing an integration.
 - Update README and examples when commands/configuration change. Keep the pricing table explicit.
-- Before finishing, run `.venv/bin/pytest`, `.venv/bin/ruff check .`, and `.venv/bin/ruff format --check .`.
+- Use `.venv/bin/python3.12` for project commands in WSL; do not use the Windows system Python.
+- Before finishing, run `.venv/bin/python3.12 -m pytest`, `.venv/bin/python3.12 -m ruff check .`,
+  and `.venv/bin/python3.12 -m ruff format --check .`.

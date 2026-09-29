@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from trader.config import active_mode, environment_values, load_config
-from trader.errors import SafetyError
+from trader.errors import SafetyError, error_details
 from trader.storage import Storage, process_lock
 from trader.util import configure_logging, dumps, utcnow
 
@@ -36,6 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging()
     store = None
     client = None
+    stage = "configuration"
     try:
         mode = active_mode(args.env_file)
         banner = f"TRADING MODE: {mode.upper()}"
@@ -43,6 +44,7 @@ def main(argv: list[str] | None = None) -> int:
             banner = f"!!! {banner} — REAL ORDERS ENABLED !!!"
         print(banner, flush=True)
         env, cfg = load_config(args.env_file)
+        stage = "database"
         database = env.TRADER_DB.resolve()
         with process_lock(database.with_suffix(".lock")):
             store = Storage(database)
@@ -74,8 +76,10 @@ def main(argv: list[str] | None = None) -> int:
             from trader.coinbase_client import build_adapters
             from trader.execution import make_executor, recover_orders
 
+            stage = "coinbase_setup"
             adapters = build_adapters(cfg, environment_values(args.env_file))
             if args.command == "maintain-orders":
+                stage = "maintain-orders"
                 # No market data, model request, budget gate or cycle slot needed to reduce
                 # outstanding execution risk. An API/model outage must not prevent recovery.
                 recover_orders(
@@ -94,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
             from trader.market_data import MarketData
             from trader.orchestrator import Orchestrator
 
+            stage = "openai_setup"
             client = OpenAI(
                 api_key=env.OPENAI_API_KEY.get_secret_value(),
                 max_retries=0,
@@ -104,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
             service = Orchestrator(
                 cfg, mode, store, MarketData(cfg, adapters, store), llm, executor
             )
+            stage = args.command
             if args.command == "run":
                 print(dumps({"completed_cycle": service.run(scheduled=args.scheduled)}))
             else:
@@ -137,7 +143,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "maintain-orders" and reason == "CYCLE_ALREADY_RUNNING":
             print(dumps({"status": "BUSY", "reason": reason}), flush=True)
             return 0  # The next maintenance tick will retry without overlapping a trading cycle.
-        print(dumps({"status": "FAILED_CLOSED", "reason": reason}), flush=True)
+        details = {"stage": stage, **error_details(exc)}
+        print(dumps({"status": "FAILED_CLOSED", "reason": reason, "details": details}), flush=True)
         return 1
     finally:
         if client is not None:

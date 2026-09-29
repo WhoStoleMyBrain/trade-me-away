@@ -7,7 +7,7 @@ from typing import Protocol
 
 from trader.coinbase_client import ACTIVE_STATUSES, FINAL_STATUSES, CoinbaseAdapter
 from trader.config import AppConfig, Mode, active_mode
-from trader.errors import SafetyError
+from trader.errors import SafetyError, error_details
 from trader.portfolio import apply_fills, expected_after_fills, reconcile_actual, seed_ledger
 from trader.schemas import (
     AccountState,
@@ -213,7 +213,14 @@ class CoinbaseLiveExecutor(BaseExecutor):
         )
         try:
             response = adapter.submit(intent)
-        except Exception:
+        except Exception as exc:
+            event(
+                "order_submission_error",
+                intent.cycle_id,
+                self.mode,
+                client_order_id=intent.client_order_id,
+                details={"operation": "submit_order", "attempt": 1, **error_details(exc)},
+            )
             # Never repeat POST, even if discovery returns no matching order (eventual consistency).
             return self._discover_and_verify(intent, allow_cancel=True)
         if response.get("success") is not True:
@@ -267,7 +274,14 @@ class CoinbaseLiveExecutor(BaseExecutor):
     ) -> ExecutionResult:
         try:
             order = self.adapters[intent.portfolio].find_order(intent)
-        except Exception:
+        except Exception as exc:
+            event(
+                "order_discovery_error",
+                intent.cycle_id,
+                self.mode,
+                client_order_id=intent.client_order_id,
+                details=error_details(exc),
+            )
             return self._unknown(intent, None, "SUBMISSION_OUTCOME_UNKNOWN")
         if order is None:
             return self._unknown(intent, None, "SUBMISSION_NOT_FOUND_YET")
@@ -304,7 +318,18 @@ class CoinbaseLiveExecutor(BaseExecutor):
         try:
             accepted = self.adapters[intent.portfolio].cancel(order["order_id"])
             status = "ACKNOWLEDGED" if accepted else "REJECTED"
-        except Exception:
+        except Exception as exc:
+            event(
+                "order_cancellation_error",
+                intent.cycle_id,
+                self.mode,
+                client_order_id=intent.client_order_id,
+                details={
+                    "operation": "cancel_orders",
+                    "attempt": len(attempts) + 1,
+                    **error_details(exc),
+                },
+            )
             # Cancellation may race a fill or time out. Only a subsequent GET can resolve it.
             status = "UNKNOWN"
         self.store.finish_cancellation(attempt_id, status)
@@ -433,7 +458,11 @@ class CoinbaseLiveExecutor(BaseExecutor):
                     intent.cycle_id,
                     self.mode,
                     order_id,
-                    {"verification_reason": reason, "attempt": attempt + 1},
+                    {
+                        "verification_reason": reason,
+                        "attempt": attempt + 1,
+                        "details": error_details(exc),
+                    },
                 )
             if attempt + 1 < self.cfg.execution.verification_attempts:
                 time.sleep(self.cfg.execution.verification_delay_seconds * 2 ** min(attempt, 3))
@@ -536,6 +565,7 @@ def recover_orders(
                 intent.mode,
                 client_order_id=intent.client_order_id,
                 reason=exc.code if isinstance(exc, SafetyError) else "ORDER_RECOVERY_FAILED",
+                details=error_details(exc),
             )
         # One bad portfolio must not prevent another owned order from being recovered/cancelled.
     if unresolved:

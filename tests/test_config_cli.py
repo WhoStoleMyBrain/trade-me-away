@@ -80,11 +80,17 @@ def test_cli_errors_never_print_secrets(cfg, monkeypatch, tmp_path, capsys):
     assert "SECRET_SENTINEL" not in captured.out + captured.err
 
 
-def test_sdk_owned_log_handler_is_silenced(capsys):
+@pytest.mark.parametrize("late_sdk_logging", [False, True])
+def test_sdk_owned_log_handler_is_silenced(capsys, late_sdk_logging):
     import requests
+    from coinbase.api_base import get_logger
     from coinbase.rest.rest_base import handle_exception
 
     configure_logging()
+    if late_sdk_logging:
+        # Lazy SDK imports call this after CLI logging setup, adding handlers and resetting levels.
+        get_logger("coinbase.RESTClient")
+        get_logger("coinbase.RESTClient")
     response = requests.Response()
     response.status_code = 401
     response._content = b"SECRET_SENTINEL"

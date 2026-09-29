@@ -36,13 +36,28 @@ testing, not authenticated exchange certification.
 | [Get order](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/orders/get-order) | Match identity, status, settled flag, number of fills, filled size/value and fees; inspect pending cancellation |
 | [Cancel orders](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/orders/cancel-order) | `cancel_orders(order_ids=[owned_id])`, POST `/orders/batch_cancel`; per-order success acknowledges initiation only |
 | [Fee summary](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/fees/get-transaction-summary) | `get_transaction_summary(product_type="SPOT")`; configured allowance must cover `fee_tier.taker_fee_rate`; special/unknown commission schedules fail closed |
-| [List orders](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/orders/list-orders) | Paginate active orders; discover ambiguous submissions by client ID in history |
+| [List orders](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/orders/list-orders) | Paginate each active status separately; discover ambiguous submissions by client ID in history |
 | [Fills](https://docs.cdp.coinbase.com/api-reference/advanced-trade-api/rest-api/orders/list-fills) | Order-filtered pagination, entry IDs, price, size, `size_in_quote`, commission and trade timestamp |
 
 The official SDK's `limit_order_ioc` constructs `sor_limit_ioc` with `base_size` and `limit_price`.
 Market buy uses quote size; market sell uses base size. Neither call includes portfolio transfers,
 leverage, margin, or derivative fields. Product aliases are not silently converted into a different
 quote currency.
+
+The installed SDK 1.8.4 and official List Orders schema accept an `order_status` array, but an
+authenticated response on 2026-09-25 confirmed that combining active statuses returns HTTP 400.
+Account refresh therefore queries OPEN, PENDING, QUEUED, EDIT_QUEUED and CANCEL_QUEUED separately,
+with independent pagination and unchanged portfolio/authentication checks. This requires at least
+five order-list GETs per refresh. Failure of any scan blocks the snapshot; it is never treated as
+an empty result. SDK HTTP-contract tests cover single-status requests and all pages. SDK logging
+is disabled before lazy imports, which otherwise reset log levels and install duplicate handlers.
+
+Failure diagnostics use only selected operation names, numeric HTTP status codes and attempt counts.
+The installed Coinbase SDK's `HTTPError.response.status_code` and OpenAI's
+`APIStatusError.status_code` were checked against the SDK implementations and
+[OpenAI error documentation](https://developers.openai.com/api/docs/guides/error-codes).
+Exception messages, headers, URLs and response bodies remain excluded; bounded read retries and
+single-attempt order submission semantics are unchanged.
 
 IOC applies to buys and sells; the exchange cancels the unfilled remainder immediately.
 [Official order types](https://help.coinbase.com/en/coinbase/trading-and-funding/advanced-trade/order-types).
@@ -57,6 +72,11 @@ The five configured candle intervals use the existing `get_candles(product_id, s
 granularity, limit)` SDK method. Four-hour/daily signatures and accepted API granularities were
 rechecked; their serialized GET requests are tested using the official SDK with a mocked transport.
 Only completed UTC buckets enter features; quotes and accounts have independent freshness checks.
+Public candle GETs on 2026-09-25 reproduced an inclusive end boundary: a request capped at 300
+buckets included the bucket starting at the close cutoff, leaving only 299 eligible closed candles.
+Requests now end one second before that cutoff, retaining the original start and count (up to 350).
+Mocks reproduce inclusive-end, newest-first truncation; regression tests cover all configured
+timeframes and the 350-bucket limit. Missing or invalid completed candles still fail validation.
 No native TP/SL order is submitted by this version; see the [implementation plan](tp-sl-plan.md).
 
 Fills can use quote-denominated size, which is converted to base with Decimal price. Cursor-only fill

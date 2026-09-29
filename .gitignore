@@ -152,6 +152,8 @@ activemq-data/
 .env.*
 !.env.example
 config.yaml
+/constants.py
+/tmp.txt
 var/
 *.db
 *.db-*

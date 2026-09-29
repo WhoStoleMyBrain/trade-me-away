@@ -7,7 +7,7 @@ from openai import APIConnectionError, APIStatusError, OpenAI
 
 from trader.config import LLMConfig
 from trader.costs import estimate_cost, reservation
-from trader.errors import SafetyError
+from trader.errors import SafetyError, error_details
 from trader.prompt import INSTRUCTIONS
 from trader.schemas import DecisionBatch
 from trader.storage import Storage
@@ -30,8 +30,19 @@ class DecisionClient:
                     isinstance(exc, APIStatusError)
                     and (exc.status_code == 429 or exc.status_code >= 500)
                 )
+                details = {
+                    **error_details(exc),
+                    "operation": "models.retrieve",
+                    "http_status": exc.status_code if isinstance(exc, APIStatusError) else None,
+                    "attempt": attempt + 1,
+                    "max_attempts": self.cfg.attempts,
+                    "retryable": transient,
+                }
+                event("openai_error", None, None, details=details)
                 if not transient or attempt + 1 == self.cfg.attempts:
-                    raise SafetyError("OPENAI_CONNECTIVITY_OR_MODEL_ACCESS_FAILED") from None
+                    raise SafetyError(
+                        "OPENAI_CONNECTIVITY_OR_MODEL_ACCESS_FAILED", details=details
+                    ) from None
                 time.sleep(0.5 * 2**attempt)
 
     def decide(self, payload: str, products: set[str], cycle: str, mode: str) -> DecisionBatch:
@@ -85,12 +96,26 @@ class DecisionClient:
                     status="ERROR_UNKNOWN_COST",
                     latency_ms=int((time.monotonic() - start) * 1000),
                 )
-                event("openai_error", cycle, mode, request_id=request_id, retryable=retryable)
+                details = {
+                    **error_details(exc),
+                    "operation": "responses.create",
+                    "http_status": exc.status_code if isinstance(exc, APIStatusError) else None,
+                    "attempt": attempt + 1,
+                    "max_attempts": self.cfg.attempts,
+                }
+                event(
+                    "openai_error",
+                    cycle,
+                    mode,
+                    request_id=request_id,
+                    retryable=retryable,
+                    details=details,
+                )
                 # Preserve the full reservation if the server may have processed the call.
                 if retryable and attempt + 1 < self.cfg.attempts:
                     time.sleep(0.5 * 2**attempt)
                     continue
-                raise SafetyError("OPENAI_REQUEST_FAILED") from None
+                raise SafetyError("OPENAI_REQUEST_FAILED", details=details) from None
             latency = int((time.monotonic() - start) * 1000)
             usage = None
             cost = None

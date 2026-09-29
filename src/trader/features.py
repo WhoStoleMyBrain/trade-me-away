@@ -22,6 +22,8 @@ HORIZONS = {
 
 
 def closed_candles(raw: list[dict], seconds: int, count: int, as_of: datetime) -> pd.DataFrame:
+    validation = "FIELDS_OR_NUMBERS_INVALID"
+    closed_count = None
     try:
         df = pd.DataFrame(raw)[["start", "open", "high", "low", "close", "volume"]].copy()
         df["start"] = pd.to_numeric(df["start"], errors="raise")
@@ -30,22 +32,40 @@ def closed_candles(raw: list[dict], seconds: int, count: int, as_of: datetime) -
         df = (
             df[df.start + seconds <= cutoff].sort_values("start").tail(count).reset_index(drop=True)
         )
+        closed_count = len(df)
         df = df.apply(pd.to_numeric, errors="raise")
-        if len(df) != count or not np.isfinite(df.to_numpy()).all():
+        validation = "COUNT_MISMATCH"
+        if len(df) != count:
             raise ValueError
+        validation = "NONFINITE_VALUE"
+        if not np.isfinite(df.to_numpy()).all():
+            raise ValueError
+        validation = "DUPLICATE_OR_MISALIGNED_START"
         if df.start.duplicated().any() or (df.start % seconds != 0).any():
             raise ValueError
+        validation = "GAP_OR_STALE_CANDLE"
         if not (df.start.diff().iloc[1:] == seconds).all() or df.start.iloc[-1] + seconds != cutoff:
             raise ValueError
+        validation = "NONPOSITIVE_PRICE_OR_NEGATIVE_VOLUME"
         if (df[["open", "high", "low", "close"]] <= 0).any().any() or (df.volume < 0).any():
             raise ValueError
+        validation = "OHLC_BOUNDS_INVALID"
         if (df.high < df[["open", "close", "low"]].max(axis=1)).any():
             raise ValueError
         if (df.low > df[["open", "close", "high"]].min(axis=1)).any():
             raise ValueError
         return df
     except (ValueError, KeyError, TypeError, IndexError):
-        raise SafetyError("CANDLE_DATA_INSUFFICIENT_OR_INVALID") from None
+        raise SafetyError(
+            "CANDLE_DATA_INSUFFICIENT_OR_INVALID",
+            details={
+                "validation": validation,
+                "interval_seconds": seconds,
+                "expected_count": count,
+                "received_count": len(raw) if isinstance(raw, list) else None,
+                "closed_count": closed_count,
+            },
+        ) from None
 
 
 def rsi(close: pd.Series, period: int = 14) -> float:
@@ -117,9 +137,15 @@ def compute_features(
     result = {}
     for candle in config.candles:
         seconds = GRANULARITIES[candle.granularity]
-        frame = closed_candles(raw.get(candle.granularity, []), seconds, candle.count, as_of)
-        frames[seconds] = frame
-        result.update({f"{seconds}s_{k}": v for k, v in timeframe_features(frame, seconds).items()})
+        try:
+            frame = closed_candles(raw.get(candle.granularity, []), seconds, candle.count, as_of)
+            frames[seconds] = frame
+            result.update(
+                {f"{seconds}s_{k}": v for k, v in timeframe_features(frame, seconds).items()}
+            )
+        except SafetyError as exc:
+            exc.details["timeframe"] = candle.granularity
+            raise
         result[f"{seconds}s_closed_at_epoch"] = float(frame.start.iloc[-1] + seconds)
     for name, horizon in HORIZONS.items():
         candidates = [s for s, f in frames.items() if horizon % s == 0 and len(f) > horizon // s]

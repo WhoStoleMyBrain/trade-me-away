@@ -13,7 +13,7 @@ from trader.errors import SafetyError
 from trader.schemas import AccountState, Balance, Fill, OrderIntent, Product, Quote
 from trader.util import ZERO, D, decimal, safe_read, timestamp, utcnow
 
-ACTIVE_STATUSES = ["OPEN", "PENDING", "QUEUED", "CANCEL_QUEUED"]
+ACTIVE_STATUSES = ["OPEN", "PENDING", "QUEUED", "EDIT_QUEUED", "CANCEL_QUEUED"]
 FINAL_STATUSES = {"FILLED", "CANCELLED", "EXPIRED", "FAILED", "REJECTED"}
 
 
@@ -33,7 +33,17 @@ class CoinbaseAdapter:
 
     def read(self, method: str, **kwargs: Any) -> dict:
         with self._lock:
-            return safe_read(lambda: plain(getattr(self.client, method)(**kwargs)))
+            try:
+                return safe_read(
+                    lambda: plain(getattr(self.client, method)(**kwargs)), operation=method
+                )
+            except SafetyError as exc:
+                exc.details["portfolio"] = self.portfolio
+                # Never include arbitrary request arguments, credentials, URLs or API bodies.
+                for key in ("product_id", "granularity"):
+                    if key in kwargs:
+                        exc.details[key] = kwargs[key]
+                raise
 
     def check_permissions(self, mode: Mode) -> None:
         p = self.read("get_api_key_permissions")
@@ -182,7 +192,11 @@ class CoinbaseAdapter:
         # A complete authenticated account listing establishes zero for absent crypto accounts.
         for currency in required_currencies:
             balances.setdefault(currency, Balance(available=ZERO, hold=ZERO))
-        orders = self.pages("list_orders", "orders", order_status=ACTIVE_STATUSES)
+        # Coinbase rejects multiple active statuses in one request, despite the array parameter.
+        # Each status needs its own complete pagination; a failed scan must block the snapshot.
+        orders = []
+        for status in ACTIVE_STATUSES:
+            orders.extend(self.pages("list_orders", "orders", order_status=[status]))
         fills = self.pages(
             "get_fills",
             "fills",

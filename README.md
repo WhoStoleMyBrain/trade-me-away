@@ -49,6 +49,9 @@ and orchestration. `AGENTS.md` records invariants for future changes.
 Use Python **3.12 or later** on Linux or macOS. The file lock uses Unix `flock`; systemd deployment
 targets Linux. Keep the host clock synchronized.
 
+For this Windows/WSL checkout, run commands in WSL using `.venv/bin/python3.12` explicitly;
+for example, `.venv/bin/python3.12 -m trader doctor` instead of `python -m trader doctor`.
+
 ```bash
 git clone <your-repository-url> crypto-trader
 cd crypto-trader
@@ -336,6 +339,20 @@ Domain payloads are JSON; monetary values are decimal strings. Times are UTC. Or
 mode-tagged. A cycle ID connects all activity. Inspection commands work offline without Coinbase
 connectivity; trading, doctor, and reconciliation perform startup checks.
 
+Failures include a `details` object alongside the existing reason code. Candle validation reports
+the product, timeframe, expected/received/eligible candle counts and failed check. Cycle failures
+include the processing stage; unexpected exceptions include the exception type and the innermost
+application filename/function/line, without exception messages, source text, locals or full paths.
+These details are also persisted in the cycle's `risk_results` audit record.
+
+Coinbase read failures and OpenAI request failures record the operation, HTTP status when available,
+and attempt number. Low-level Coinbase retry events and standalone OpenAI model-access checks have
+null cycle/mode fields; terminal errors carry their details into the enclosing cycle or CLI result.
+Order submission/cancellation errors retain the original client order ID and never trigger new
+submission retries. SDK bodies, headers, credentials and arbitrary request arguments are not logged.
+This adds diagnostics only; reason codes, validation, retries, budgets and trading behavior are unchanged.
+Journal persistence/retention and failure alerts still need to be configured on the host.
+
 ```bash
 python -m trader reconcile
 python -m trader maintain-orders
@@ -438,9 +455,9 @@ See [integration verification notes](docs/integrations.md) for the official endp
 ## Tests
 
 ```bash
-pytest
-ruff check .
-ruff format --check .
+.venv/bin/python3.12 -m pytest
+.venv/bin/python3.12 -m ruff check .
+.venv/bin/python3.12 -m ruff format --check .
 ```
 
 Tests block outbound socket connections and replace Coinbase/OpenAI calls. Coverage prioritizes

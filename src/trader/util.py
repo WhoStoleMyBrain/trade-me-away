@@ -11,7 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from trader.errors import SafetyError
+from trader.errors import SafetyError, error_details
 
 D = Decimal
 ZERO = D("0")
@@ -69,29 +69,54 @@ def dumps(value: Any) -> str:
     )
 
 
-def safe_read[T](call: Callable[[], T], attempts: int = 3, delay: float = 0.5) -> T:
+def safe_read[T](
+    call: Callable[[], T],
+    attempts: int = 3,
+    delay: float = 0.5,
+    *,
+    operation: str = "coinbase_read",
+) -> T:
     """Bounded retries ONLY for transport errors, throttling, and server failures."""
     import requests
+
+    details = {}
+
+    def record(exc: Exception, attempt: int, status: int | None, retryable: bool) -> dict:
+        diagnostic = {
+            **error_details(exc),
+            "operation": operation,
+            "attempt": attempt + 1,
+            "max_attempts": attempts,
+            "http_status": status,
+            "retryable": retryable,
+        }
+        # The read boundary also runs in worker threads and during standalone maintenance.
+        # Terminal diagnostics are propagated to the caller's cycle/command failure record.
+        event("coinbase_read_error", None, None, details=diagnostic)
+        return diagnostic
 
     for attempt in range(attempts):
         try:
             return call()
-        except (requests.Timeout, requests.ConnectionError):
-            pass
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            details = record(exc, attempt, None, True)
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else 0
+            details = record(exc, attempt, status or None, status == 429 or status >= 500)
             if status != 429 and status < 500:
-                raise SafetyError("COINBASE_READ_REJECTED") from None
-        except SafetyError:
+                raise SafetyError("COINBASE_READ_REJECTED", details=details) from None
+        except SafetyError as exc:
+            exc.details = record(exc, attempt, None, False)
             raise
-        except Exception:
-            raise SafetyError("COINBASE_RESPONSE_INVALID") from None
+        except Exception as exc:
+            details = record(exc, attempt, None, False)
+            raise SafetyError("COINBASE_RESPONSE_INVALID", details=details) from None
         if attempt + 1 < attempts:
             time.sleep(delay * 2**attempt)
-    raise SafetyError("COINBASE_READ_UNAVAILABLE")
+    raise SafetyError("COINBASE_READ_UNAVAILABLE", details=details)
 
 
-def event(name: str, cycle_id: str, mode: str, **fields: Any) -> None:
+def event(name: str, cycle_id: str | None, mode: str | None, **fields: Any) -> None:
     """Only pass explicitly selected domain data, never SDK responses/exceptions."""
     logging.getLogger("trader").info(
         dumps({"time": utcnow(), "event": name, "cycle_id": cycle_id, "mode": mode, **fields})
@@ -103,6 +128,8 @@ def configure_logging() -> None:
     # Third-party HTTP error/debug logging may include request bodies or authentication.
     for name in ("coinbase", "coinbase.RESTClient", "httpx", "httpcore", "openai", "dotenv.main"):
         logger = logging.getLogger(name)
+        # Lazy SDK imports can reset the level and add handlers after startup configuration.
+        logger.disabled = True
         logger.handlers = [logging.NullHandler()]
         logger.propagate = False
         logger.setLevel(logging.CRITICAL + 1)

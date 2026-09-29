@@ -64,14 +64,20 @@ class MarketData:
             for candle in self.cfg.market.candles:
                 seconds = GRANULARITIES[candle.granularity]
                 end = int(candle_as_of.timestamp()) // seconds * seconds
+                # Coinbase includes the bucket starting at end; exclude it so the response limit
+                # cannot displace the oldest required closed candle with an unfinished bucket.
                 raw[candle.granularity] = adapter.candles(
                     asset.product_id,
                     candle.granularity,
                     end - seconds * candle.count,
-                    end,
+                    end - 1,
                     candle.count,
                 )
-            features = compute_features(raw, self.cfg.market, candle_as_of)
+            try:
+                features = compute_features(raw, self.cfg.market, candle_as_of)
+            except SafetyError as exc:
+                exc.details["product_id"] = asset.product_id
+                raise
             quote = adapter.quote(asset.product_id)
             features["spread_bps"] = float(quote.spread_bps)
             return (

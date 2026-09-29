@@ -262,7 +262,12 @@ def sdk(actual):
     def candles(product_id, start, end, granularity, limit):
         from trader.config import GRANULARITIES
 
-        return {"candles": candle_rows(GRANULARITIES[granularity], limit, int(end))}
+        # Coinbase includes buckets starting at end and limits the newest-first result.
+        seconds = GRANULARITIES[granularity]
+        first = (int(start) + seconds - 1) // seconds * seconds
+        last = int(end) // seconds * seconds
+        count = min(limit, max(0, (last - first) // seconds + 1))
+        return {"candles": list(reversed(candle_rows(seconds, count, last + seconds)))}
 
     client.get_accounts.side_effect = accounts
     client.get_product.side_effect = products

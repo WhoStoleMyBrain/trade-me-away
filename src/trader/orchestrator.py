@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from trader.config import AppConfig, Mode
 from trader.costs import budget_available
-from trader.errors import SafetyError
+from trader.errors import SafetyError, error_details
 from trader.execution import Executor, recover_orders
 from trader.llm import DecisionClient
 from trader.market_data import MarketData
@@ -91,12 +91,16 @@ class Orchestrator:
         cycle = str(uuid4())
         self.store.begin_cycle(cycle, cycle_slot(start), self.mode, self.cfg, start)
         event("cycle_started", cycle, self.mode)
+        stage = "startup"
         try:
             self.startup(cycle, allow_cancel=True)
+            stage = "market_snapshot"
             markets, actual = self.market.snapshot(cycle, self.mode)
+            stage = "portfolio_valuation"
             states = self.portfolios(
                 actual, {p: m.quote for p, m in markets.items()}, cycle, "decision"
             )
+            stage = "preflight"
             # Preflight all assets locally before incurring model costs.
             for market in markets.values():
                 if not market.features or not market.product.tradable:
@@ -106,6 +110,7 @@ class Orchestrator:
                 for p in states.values()
             ):
                 raise SafetyError("PORTFOLIO_PREFLIGHT_FAILED")
+            stage = "model_request"
             payload = build_payload(self.cfg, markets, states, self.store, self.mode, utcnow())
             # One joint decision, with transport-only retries internal to the client.
             batch = self.llm.decide(payload, set(markets), cycle, self.mode)
@@ -113,6 +118,7 @@ class Orchestrator:
             decisions = {d.product_id: d for d in batch.decisions}
             decision_at = min(m.as_of for m in markets.values())
             for asset in self.cfg.enabled_assets:
+                stage = "risk_assessment"
                 decision = decisions[asset.product_id]
                 market = markets[asset.product_id]
                 risk = assess(
@@ -146,6 +152,8 @@ class Orchestrator:
                     continue
 
                 def guard(intent: OrderIntent) -> OrderIntent:
+                    nonlocal stage
+                    stage = "pre_execution"
                     refreshed, accounts = self.market.refresh()
                     updated = self.portfolios(
                         accounts, {p: q for p, (_, q) in refreshed.items()}, cycle, "pre_execution"
@@ -178,29 +186,34 @@ class Orchestrator:
                         product.quote_min_size, self.cfg.risk.min_order_notional
                     ):
                         raise SafetyError("PRE_EXECUTION_BELOW_MINIMUM")
+                    stage = "execution"
                     return final
 
+                stage = "execution"
                 result = self.executor.execute(risk.intent, guard)
                 if not result.terminal:
                     raise SafetyError("UNRESOLVED_EXECUTION")
                 # Refresh the entire portfolio after each execution, so shared cash/exposure and
                 # daily limits are updated before considering another asset from the fixed batch.
+                stage = "post_execution"
                 refreshed, accounts = self.market.refresh()
                 states = self.portfolios(
                     accounts, {p: q for p, (_, q) in refreshed.items()}, cycle, "after_execution"
                 )
+            stage = "completion"
             self.store.finish_cycle(cycle, "COMPLETED")
             event("cycle_completed", cycle, self.mode)
             return cycle
         except Exception as exc:
             reason = exc.code if isinstance(exc, SafetyError) else "UNEXPECTED_CYCLE_FAILURE"
+            details = {"stage": stage, **error_details(exc)}
             self.store.finish_cycle(cycle, "HOLD", reason)
             self.store.audit(
                 "risk_results",
                 cycle,
                 self.mode,
                 "cycle",
-                {"status": "REJECTED", "reasons": [reason]},
+                {"status": "REJECTED", "reasons": [reason], "details": details},
             )
-            event("cycle_failed_closed", cycle, self.mode, reason=reason)
-            raise SafetyError(reason) from None
+            event("cycle_failed_closed", cycle, self.mode, reason=reason, details=details)
+            raise SafetyError(reason, details=details) from None

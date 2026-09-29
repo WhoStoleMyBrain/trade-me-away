@@ -1,3 +1,4 @@
+import json
 from unittest.mock import Mock
 
 import pytest
@@ -5,6 +6,89 @@ import requests
 
 from trader.errors import SafetyError
 from trader.util import safe_read
+
+
+def test_active_order_sdk_queries_single_status_and_paginates_each(monkeypatch, sdk):
+    from coinbase.rest import RESTClient
+
+    from trader.coinbase_client import CoinbaseAdapter
+
+    statuses = ["OPEN", "PENDING", "QUEUED", "EDIT_QUEUED", "CANCEL_QUEUED"]
+    client = RESTClient(api_key="unit-test-unused", api_secret="unit-test-unused", timeout=15)
+    monkeypatch.setattr(client, "set_headers", lambda *_: {})
+    monkeypatch.setattr(client, "get_accounts", sdk.get_accounts)
+    monkeypatch.setattr(client, "get_fills", sdk.get_fills)
+    seen = []
+
+    def request(method, url, **kwargs):
+        assert method == "GET"
+        assert url == "https://api.coinbase.com/api/v3/brokerage/orders/historical/batch"
+        params = kwargs["params"]
+        response = requests.Response()
+        if len(params["order_status"]) != 1:
+            response.status_code = 400
+            response._content = b'{"error":"INVALID_ARGUMENT"}'
+            return response
+        status = params["order_status"][0]
+        cursor = params.get("cursor")
+        assert params == {
+            "order_status": [status],
+            "limit": 100,
+            **({"cursor": f"{status}-next"} if cursor else {}),
+        }
+        seen.append((status, cursor))
+        response.status_code = 200
+        response._content = json.dumps(
+            {
+                "orders": [
+                    {
+                        "order_id": f"{status}-{bool(cursor)}",
+                        "client_order_id": "external-client",
+                        "product_id": "BTC-USDC",
+                        "side": "BUY",
+                        "status": status,
+                        "retail_portfolio_id": "test-portfolio",
+                    }
+                ],
+                "has_next": cursor is None,
+                "cursor": f"{status}-next" if cursor is None else "",
+            }
+        ).encode()
+        return response
+
+    monkeypatch.setattr(client.session, "request", request)
+    try:
+        account = CoinbaseAdapter(client, "main", "test-portfolio").account({"BTC"})
+        assert seen == [(s, c) for s in statuses for c in (None, f"{s}-next")]
+        assert {o["order_id"] for o in account.open_orders} == {
+            f"{s}-{page}" for s in statuses for page in (False, True)
+        }
+    finally:
+        client.session.close()
+
+
+@pytest.mark.parametrize("status", ["OPEN", "PENDING", "QUEUED", "EDIT_QUEUED", "CANCEL_QUEUED"])
+@pytest.mark.parametrize("problem", ["http_error", "wrong_portfolio", "history_auth"])
+def test_active_order_scan_fails_closed_for_every_status(adapter, sdk, status, problem):
+    def orders(**kwargs):
+        if kwargs["order_status"] != [status]:
+            return {"orders": [], "has_next": False}
+        if problem == "http_error":
+            response = requests.Response()
+            response.status_code = 400
+            raise requests.HTTPError("DO_NOT_LOG", response=response)
+        if problem == "history_auth":
+            return {"orders": [], "has_next": False, "proof_token_required": True}
+        return {"orders": [{"retail_portfolio_id": "other-portfolio"}], "has_next": False}
+
+    sdk.list_orders.side_effect = orders
+    reason = {
+        "http_error": "COINBASE_READ_REJECTED",
+        "wrong_portfolio": "ORDER_PORTFOLIO_MISMATCH",
+        "history_auth": "COINBASE_HISTORY_AUTHENTICATION_REQUIRED",
+    }[problem]
+    with pytest.raises(SafetyError, match=reason):
+        adapter.account({"BTC"})
 
 
 def test_portfolio_permissions_and_product_type(adapter, sdk):
