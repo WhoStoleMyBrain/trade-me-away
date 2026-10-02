@@ -24,6 +24,7 @@ def main(argv: list[str] | None = None) -> int:
             "show-state",
             "show-costs",
             "show-orders",
+            "show-decisions",
         ],
     )
     parser.add_argument(
@@ -62,7 +63,11 @@ def main(argv: list[str] | None = None) -> int:
                         )
                     )
                 else:
-                    table = "strategy_state" if args.command == "show-state" else "orders"
+                    table = {
+                        "show-state": "strategy_state",
+                        "show-orders": "orders",
+                        "show-decisions": "decision_records",
+                    }[args.command]
                     result = {table: store.rows(table), "unresolved_orders": store.unresolved()}
                     if args.command == "show-orders":
                         result["cancellation_attempts"] = store.rows("cancellation_attempts")

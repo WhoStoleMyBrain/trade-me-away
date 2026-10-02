@@ -327,6 +327,17 @@ are local estimates, not invoices; review rates before changing models, tiers, o
 
 ## Audit and operations
 
+`python -m trader show-decisions` shows the latest per-portfolio decision records, including HOLDs,
+initial/refreshed risk assessments, the final executable intent, fills and verified post-trade
+exposure. Requested and approved notionals use the continuous sizing calculation at the execution
+price (including the existing fee allowance); executable notionals additionally include exchange
+rounding. Actual filled notional excludes fees, which remain recorded on each fill.
+`REDUCED` means a sizing limit applied; rounding alone remains `APPROVED` with
+`EXECUTION_ROUNDING`. Specific reasons identify exposure, order-size, cash or exchange limits.
+`NOT_ASSESSED`, `NOT_ATTEMPTED` and `PENDING` distinguish skipped work from a terminal execution.
+Unknown execution amounts/exposure remain null; after an interrupted cycle, consult `show-orders`
+and reconciliation for recovered execution evidence. Records never imply an acknowledgment is a fill.
+
 Default database: `var/trader.sqlite3`; lock: `var/trader.lock`. Structured JSON logs go to stdout /
 stderr, captured by journald under systemd. Local log files, database/WAL files, secrets and caches
 are ignored by Git. Files created by the CLI use a restrictive umask.

@@ -117,6 +117,43 @@ def test_refresh_only_shrinks(intent, product):
     assert capped.client_order_id == intent.client_order_id
 
 
+def test_exchange_rounding_is_not_a_risk_reduction(cfg, decision, portfolio, product, quote):
+    cfg.risk.max_order_notional = D("1000")
+    result = assess(decision, portfolio, product, quote, cfg, "c", "paper", NOW)
+    assert result.status == "APPROVED"
+    assert result.reasons == ["EXECUTION_ROUNDING"]
+    assert result.approved_target_exposure == D("0.2")
+    assert result.approved_notional == result.requested_notional
+    assert result.executable_notional < result.approved_notional
+
+
+def test_even_small_risk_cap_is_reported(cfg, decision, portfolio, product, quote):
+    cfg.risk.max_order_notional = D("199.75")
+    result = assess(decision, portfolio, product, quote, cfg, "c", "paper", NOW)
+    assert result.status == "REDUCED"
+    assert "MAX_ORDER_NOTIONAL" in result.reasons
+    assert result.approved_target_exposure < result.requested_target_exposure
+    assert result.approved_notional == cfg.risk.max_order_notional
+
+
+def test_sell_rounding_and_order_cap_are_distinct(cfg, decision, portfolio, product, quote):
+    portfolio = portfolio.model_copy(
+        update={
+            "positions": {"BTC-USDC": StrategyPosition(quantity=D("5"))},
+            "cash": D("500"),
+            "exposure_value": D("500"),
+        }
+    )
+    decision = decision.model_copy(update={"action": "DECREASE", "target_exposure": 0.456789})
+    result = assess(decision, portfolio, product, quote, cfg, "c", "paper", NOW)
+    assert result.status == "APPROVED"
+    assert result.reasons == ["EXECUTION_ROUNDING"]
+    decision = decision.model_copy(update={"action": "EXIT", "target_exposure": 0.0})
+    result = assess(decision, portfolio, product, quote, cfg, "c", "paper", NOW)
+    assert result.status == "REDUCED"
+    assert result.approved_target_exposure > 0
+
+
 def test_same_risk_in_paper_and_live(cfg, decision, portfolio, product, quote):
     paper = assess(decision, portfolio, product, quote, cfg, "c", "paper", NOW)
     live = assess(decision, portfolio, product, quote, cfg, "c", "live", NOW)

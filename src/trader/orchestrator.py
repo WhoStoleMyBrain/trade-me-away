@@ -14,7 +14,7 @@ from trader.prompt import build_payload
 from trader.risk import assess, cap_refreshed_intent
 from trader.schemas import AccountState, OrderIntent, PortfolioState, Quote
 from trader.storage import Storage
-from trader.util import event, utcnow
+from trader.util import ZERO, event, utcnow
 
 
 def cycle_slot(now: datetime) -> str:
@@ -117,6 +117,26 @@ class Orchestrator:
             batch.validate_products(set(markets))
             decisions = {d.product_id: d for d in batch.decisions}
             decision_at = min(m.as_of for m in markets.values())
+            # Persist every decision before execution, including HOLD and assets skipped on failure.
+            for asset in self.cfg.enabled_assets:
+                market = markets[asset.product_id]
+                self.store.decision_record(
+                    cycle,
+                    self.mode,
+                    asset.portfolio,
+                    asset.product_id,
+                    decision=decisions[asset.product_id],
+                    decision_at=utcnow(),
+                    reference_price=market.quote.mid,
+                    quote_time=market.quote.observed_at,
+                    initial_exposure=states[asset.portfolio].exposure(
+                        asset.product_id, market.quote.mid
+                    ),
+                    risk_status="NOT_ASSESSED",
+                    execution_status="NOT_ATTEMPTED",
+                    executed_notional=None,
+                    executed_exposure=None,
+                )
             for asset in self.cfg.enabled_assets:
                 stage = "risk_assessment"
                 decision = decisions[asset.product_id]
@@ -138,17 +158,41 @@ class Orchestrator:
                     cycle,
                     self.mode,
                     asset.product_id,
-                    {"phase": "initial", "result": risk},
+                    {"phase": "initial", "portfolio": asset.portfolio, "result": risk},
+                )
+                self.store.decision_record(
+                    cycle,
+                    self.mode,
+                    asset.portfolio,
+                    asset.product_id,
+                    risk_status=risk.status,
+                    initial_risk=risk,
                 )
                 event(
                     "risk_decision",
                     cycle,
                     self.mode,
                     product_id=asset.product_id,
+                    portfolio=asset.portfolio,
                     status=risk.status,
                     reasons=risk.reasons,
+                    requested_target_exposure=decision.target_exposure,
+                    approved_target_exposure=risk.approved_target_exposure,
+                    requested_notional=risk.requested_notional,
+                    approved_notional=risk.approved_notional,
+                    executable_notional=risk.executable_notional,
                 )
                 if risk.intent is None:
+                    self.store.decision_record(
+                        cycle,
+                        self.mode,
+                        asset.portfolio,
+                        asset.product_id,
+                        executed_notional=ZERO,
+                        executed_exposure=states[asset.portfolio].exposure(
+                            asset.product_id, market.quote.mid
+                        ),
+                    )
                     continue
 
                 def guard(intent: OrderIntent) -> OrderIntent:
@@ -177,7 +221,19 @@ class Orchestrator:
                         cycle,
                         self.mode,
                         intent.product_id,
-                        {"phase": "pre_execution", "result": checked},
+                        {
+                            "phase": "pre_execution",
+                            "portfolio": intent.portfolio,
+                            "result": checked,
+                        },
+                    )
+                    self.store.decision_record(
+                        cycle,
+                        self.mode,
+                        intent.portfolio,
+                        intent.product_id,
+                        risk_status=checked.status,
+                        refreshed_risk=checked,
                     )
                     if checked.intent is None:
                         raise SafetyError("PRE_EXECUTION_ABORT")
@@ -187,10 +243,32 @@ class Orchestrator:
                     ):
                         raise SafetyError("PRE_EXECUTION_BELOW_MINIMUM")
                     stage = "execution"
+                    self.store.decision_record(
+                        cycle,
+                        self.mode,
+                        intent.portfolio,
+                        intent.product_id,
+                        final_intent=final,
+                        refresh_cap_applied=(
+                            final.base_size < checked.intent.base_size
+                            or final.quote_size < checked.intent.quote_size
+                        ),
+                        execution_status="PENDING",
+                    )
                     return final
 
                 stage = "execution"
                 result = self.executor.execute(risk.intent, guard)
+                executed_notional = sum((f.base_size * f.price for f in result.fills), ZERO)
+                self.store.decision_record(
+                    cycle,
+                    self.mode,
+                    asset.portfolio,
+                    asset.product_id,
+                    execution_status=result.status,
+                    execution=result,
+                    executed_notional=executed_notional if result.terminal else None,
+                )
                 if not result.terminal:
                     raise SafetyError("UNRESOLVED_EXECUTION")
                 # Refresh the entire portfolio after each execution, so shared cash/exposure and
@@ -199,6 +277,27 @@ class Orchestrator:
                 refreshed, accounts = self.market.refresh()
                 states = self.portfolios(
                     accounts, {p: q for p, (_, q) in refreshed.items()}, cycle, "after_execution"
+                )
+                self.store.decision_record(
+                    cycle,
+                    self.mode,
+                    asset.portfolio,
+                    asset.product_id,
+                    executed_exposure=states[asset.portfolio].exposure(
+                        asset.product_id, refreshed[asset.product_id][1].mid
+                    ),
+                )
+                event(
+                    "decision_executed",
+                    cycle,
+                    self.mode,
+                    portfolio=asset.portfolio,
+                    product_id=asset.product_id,
+                    status=result.status,
+                    executed_notional=executed_notional,
+                    executed_exposure=states[asset.portfolio].exposure(
+                        asset.product_id, refreshed[asset.product_id][1].mid
+                    ),
                 )
             stage = "completion"
             self.store.finish_cycle(cycle, "COMPLETED")

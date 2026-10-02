@@ -81,6 +81,12 @@ class Storage:
                 mode TEXT NOT NULL, portfolio TEXT NOT NULL, updated_at TEXT NOT NULL,
                 state_json TEXT NOT NULL, PRIMARY KEY(mode, portfolio)
             );
+            CREATE TABLE IF NOT EXISTS decision_records (
+                cycle_id TEXT NOT NULL, mode TEXT NOT NULL, portfolio TEXT NOT NULL,
+                product_id TEXT NOT NULL, created_at TEXT NOT NULL, payload_json TEXT NOT NULL,
+                PRIMARY KEY(cycle_id, portfolio, product_id),
+                FOREIGN KEY(cycle_id) REFERENCES trading_cycles(cycle_id)
+            );
             CREATE TABLE IF NOT EXISTS exchange_state (
                 portfolio TEXT PRIMARY KEY, initialized_at TEXT NOT NULL,
                 state_json TEXT NOT NULL
@@ -122,6 +128,24 @@ class Storage:
 
     def close(self) -> None:
         self.db.close()
+
+    def decision_record(
+        self, cycle: str, mode: str, portfolio: str, product: str, **fields
+    ) -> None:
+        """Merge audit observations; absent execution evidence remains explicitly unknown."""
+        with self.db:
+            row = self.db.execute(
+                "SELECT payload_json FROM decision_records WHERE cycle_id=? AND portfolio=? "
+                "AND product_id=?",
+                (cycle, portfolio, product),
+            ).fetchone()
+            payload = json.loads(row[0]) if row else {}
+            self.db.execute(
+                "INSERT INTO decision_records VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(cycle_id,portfolio,product_id) DO UPDATE "
+                "SET payload_json=excluded.payload_json",
+                (cycle, mode, portfolio, product, utcnow().isoformat(), dumps(payload | fields)),
+            )
 
     def audit(self, table: str, cycle: str, mode: str, subject: str, payload: Any) -> None:
         if table not in AUDIT_TABLES:
@@ -436,6 +460,7 @@ class Storage:
 
     def rows(self, table: str, limit: int = 50) -> list[dict]:
         allowed = AUDIT_TABLES | {
+            "decision_records",
             "trading_cycles",
             "strategy_state",
             "orders",

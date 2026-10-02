@@ -1,3 +1,4 @@
+import json
 from datetime import timedelta
 
 import pytest
@@ -51,6 +52,11 @@ def test_complete_joint_paper_cycle(cfg, store, adapter, sdk, openai_mock):
     assert store.rows("trading_cycles")[0]["cycle_id"] == cycle
     assert store.ledger("paper", "main").cash < 1000
     assert store.exchange("main")["balances"]["USDC"] == "1000"
+    records = [json.loads(r["payload_json"]) for r in store.rows("decision_records")]
+    assert len(records) == 3
+    assert all(r["execution_status"] == "FILLED" for r in records)
+    assert all(D(r["executed_exposure"]) > 0 for r in records)
+    assert all(D(r["executed_notional"]) > 0 for r in records)
     sdk.limit_order_ioc.assert_not_called()
     with pytest.raises(SafetyError, match="DUPLICATE_CYCLE"):
         app.run()
@@ -71,6 +77,10 @@ def test_hold_cycle_has_no_orders(cfg, store, adapter, sdk, openai_mock):
     service(cfg, store, adapter, openai_mock).run()
     assert not store.rows("orders")
     assert openai_mock.responses.create.call_count == 1
+    records = [json.loads(r["payload_json"]) for r in store.rows("decision_records")]
+    assert all(r["risk_status"] == "HOLD" for r in records)
+    assert all(r["execution_status"] == "NOT_ATTEMPTED" for r in records)
+    assert all(D(r["executed_notional"]) == 0 for r in records)
 
 
 @pytest.mark.parametrize(

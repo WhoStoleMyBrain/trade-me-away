@@ -113,6 +113,9 @@ def assess(
     target = min(proposed, risk.max_asset_exposure) if buy else proposed
     fee = execution.taker_fee_rate
     if buy:
+        requested = (proposed * portfolio.equity - position.quantity * quote.mid) / (
+            price * (ONE + proposed * fee)
+        )
         # Worst-case price plus fees reduces post-trade equity. Bound both asset and total exposure.
         asset_room = (target * portfolio.equity - position.quantity * quote.mid) / (
             price * (ONE + target * fee)
@@ -124,17 +127,16 @@ def assess(
         capacity = portfolio.cash / (price * (ONE + fee))
     else:
         wanted = max(ZERO, position.quantity - target * portfolio.equity / quote.mid)
+        requested = wanted
         capacity = position.quantity
-    quantity = step(
-        min(
-            wanted,
-            capacity,
-            risk.max_order_notional / price,
-            product.quote_max_size / price,
-            product.base_max_size,
-        ),
-        product.base_increment,
+    approved = min(
+        wanted,
+        capacity,
+        risk.max_order_notional / price,
+        product.quote_max_size / price,
+        product.base_max_size,
     )
+    quantity = step(approved, product.base_increment)
     notional = step(quantity * price, product.quote_increment)
     if quantity < product.base_min_size or notional < max(
         risk.min_order_notional, product.quote_min_size
@@ -143,7 +145,31 @@ def assess(
     if quantity <= 0 or notional <= 0:
         return reject("ZERO_ORDER")
     # A capped sell must stop above the model's target, never liquidate extra to meet a minimum.
-    clamped = target != proposed or quantity < wanted or (buy and total_room < asset_room)
+    limits = []
+    if target != proposed:
+        limits.append("MAX_ASSET_EXPOSURE")
+    if buy and total_room < asset_room:
+        limits.append("MAX_PORTFOLIO_EXPOSURE")
+    for bound, reason in (
+        (capacity, "AVAILABLE_BALANCE"),
+        (risk.max_order_notional / price, "MAX_ORDER_NOTIONAL"),
+        (product.quote_max_size / price, "EXCHANGE_QUOTE_MAXIMUM"),
+        (product.base_max_size, "EXCHANGE_BASE_MAXIMUM"),
+    ):
+        if bound < wanted and bound == approved:
+            limits.append(reason)
+    # Invert the continuous sizing formula; rounding is deliberately excluded here.
+    approved_target = (
+        (position.quantity * quote.mid + approved * price)
+        / (portfolio.equity - approved * price * fee)
+        if buy
+        else (position.quantity - approved) * quote.mid / portfolio.equity
+    )
+    if not limits:
+        approved_target = proposed
+    reasons = list(limits)
+    if quantity != approved or notional != quantity * price:
+        reasons.append("EXECUTION_ROUNDING")
     intent = OrderIntent(
         client_order_id=str(uuid4()),
         cycle_id=cycle,
@@ -156,13 +182,18 @@ def assess(
         quote_size=notional,
         limit_price=price,
         reference_price=quote.mid,
-        approved_target_exposure=target,
+        approved_target_exposure=approved_target,
         created_at=now,
     )
     return RiskResult(
-        status="REDUCED" if clamped else "APPROVED",
-        reasons=["SIZE_OR_EXPOSURE_CLAMPED"] if clamped else [],
+        status="REDUCED" if limits else "APPROVED",
+        reasons=reasons,
         intent=intent,
+        requested_target_exposure=proposed,
+        approved_target_exposure=approved_target,
+        requested_notional=requested * price,
+        approved_notional=approved * price,
+        executable_notional=notional,
     )
 
 

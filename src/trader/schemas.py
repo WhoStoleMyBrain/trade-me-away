@@ -168,6 +168,11 @@ class RiskResult(DomainModel):
     status: Literal["APPROVED", "REDUCED", "REJECTED", "HOLD"]
     reasons: list[str]
     intent: OrderIntent | None
+    requested_target_exposure: D | None = None
+    approved_target_exposure: D | None = None
+    requested_notional: D | None = None
+    approved_notional: D | None = None
+    executable_notional: D | None = None
 
 
 class Fill(DomainModel):
