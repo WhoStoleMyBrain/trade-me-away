@@ -164,7 +164,14 @@ class PaperExecutor(BaseExecutor):
         result = ExecutionResult(order_id=order_id, status=status, fills=fills, terminal=True)
         updated = apply_fills(ledger, fills)
         self.store.record_result(intent, result, updated)
-        event("paper_execution_verified", intent.cycle_id, self.mode, result=result)
+        event(
+            "paper_execution_verified",
+            intent.cycle_id,
+            self.mode,
+            portfolio=intent.portfolio,
+            product_id=intent.product_id,
+            result=result,
+        )
         return result
 
     def recover(self, intent: OrderIntent, *, allow_cancel: bool = False) -> ExecutionResult:
@@ -494,7 +501,14 @@ class CoinbaseLiveExecutor(BaseExecutor):
             intent.portfolio,
             {"phase": "post_execution", "actual": actual, "strategy": updated},
         )
-        event("live_fills_and_balances_verified", intent.cycle_id, self.mode, result=result)
+        event(
+            "live_fills_and_balances_verified",
+            intent.cycle_id,
+            self.mode,
+            portfolio=intent.portfolio,
+            product_id=intent.product_id,
+            result=result,
+        )
 
     def recover(self, intent: OrderIntent, *, allow_cancel: bool = False) -> ExecutionResult:
         saved, status = self.store.saved_intent(intent.client_order_id)
@@ -566,6 +580,8 @@ def recover_orders(
                 "order_recovery_failed",
                 intent.cycle_id,
                 intent.mode,
+                portfolio=intent.portfolio,
+                product_id=intent.product_id,
                 client_order_id=intent.client_order_id,
                 reason=exc.code if isinstance(exc, SafetyError) else "ORDER_RECOVERY_FAILED",
                 details=error_details(exc),

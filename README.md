@@ -362,8 +362,8 @@ rounding. Actual filled notional excludes fees, which remain recorded on each fi
 `REDUCED` means a sizing limit applied; rounding alone remains `APPROVED` with
 `EXECUTION_ROUNDING`. Specific reasons identify exposure, order-size, cash or exchange limits.
 `NOT_ASSESSED`, `NOT_ATTEMPTED` and `PENDING` distinguish skipped work from a terminal execution.
-Unknown execution amounts/exposure remain null; after an interrupted cycle, consult `show-orders`
-and reconciliation for recovered execution evidence. Records never imply an acknowledgment is a fill.
+Recovery updates execution status and notional atomically with fills and balances. Exposure remains
+null if a verified post-trade quote was never recorded. Records never imply an acknowledgment is a fill.
 
 Default database: `var/trader.sqlite3`; lock: `var/trader.lock`. Structured JSON logs go to stdout /
 stderr, captured by journald under systemd. Local log files, database/WAL files, secrets and caches
@@ -489,6 +489,7 @@ every three hours. No systemd changes are applied automatically by installing th
 
 Risk-policy A/B tests use distinct Coinbase portfolios (also in paper mode), each holding only
 the tested asset. Keep their aliases stable: those aliases identify separate strategy ledgers.
+A previously recorded Coinbase portfolio cannot be adopted under a fresh alias to reset its history.
 Add both portfolios under `portfolios` with separate `.env` credential/portfolio references, then:
 
 ```yaml

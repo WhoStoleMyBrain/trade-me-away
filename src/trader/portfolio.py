@@ -28,6 +28,12 @@ def reconcile_actual(
         a.product_id.split("-")[0] for a in cfg.enabled_assets if a.portfolio == actual.portfolio
     }
     reasons = []
+    if store.db.execute(
+        "SELECT 1 FROM exchange_state WHERE portfolio!=? "
+        "AND json_extract(state_json,'$.portfolio_id')=?",
+        (actual.portfolio, actual.portfolio_id),
+    ).fetchone():
+        reasons.append("PORTFOLIO_ALIAS_REUSED")
     totals = account_totals(actual)
     risk = cfg.portfolio_risk(actual.portfolio)
     if any(c not in allowed and D(v) != 0 for c, v in totals.items()):

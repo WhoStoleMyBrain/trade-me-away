@@ -20,6 +20,19 @@ def test_reconciliation_mismatch_is_not_rebaselined(cfg, store, actual):
     assert "BALANCE_MISMATCH:BTC" in store.rows("reconciliation_events")[0]["payload_json"]
 
 
+def test_existing_coinbase_portfolio_cannot_be_adopted_under_another_alias(cfg, store, actual):
+    reconcile_actual(store, actual, cfg, "c", "paper")
+    cfg.portfolios = {"renamed": cfg.portfolios["main"]}
+    cfg.assets = [a.model_copy(update={"portfolio": "renamed"}) for a in cfg.assets]
+    with pytest.raises(SafetyError, match="RECONCILIATION_FAILED"):
+        reconcile_actual(
+            store, actual.model_copy(update={"portfolio": "renamed"}), cfg, "other", "paper"
+        )
+    assert store.exchange("renamed") is None
+    assert store.exchange("main")["portfolio_id"] == actual.portfolio_id
+    assert "PORTFOLIO_ALIAS_REUSED" in store.rows("reconciliation_events")[0]["payload_json"]
+
+
 def test_untracked_round_trip_and_unknown_assets_fail(cfg, store, actual):
     reconcile_actual(store, actual, cfg, "c", "paper")
     changed = actual.model_copy(

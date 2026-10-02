@@ -285,6 +285,14 @@ def test_recovery_applies_confirmed_fills_exactly_once(
     monkeypatch.setenv("TRADING_MODE", "live")
     intent = intent.model_copy(update={"mode": "live"})
     initialize(store, cfg, actual, ledger, intent)
+    store.decision_record(
+        intent.cycle_id,
+        "live",
+        "main",
+        intent.product_id,
+        execution_status="PENDING",
+        executed_exposure=None,
+    )
     exchange_fill(sdk, intent)
     correct_state = sdk.account_state["value"]
     sdk.account_state["value"] = actual  # balances lag the confirmed fill
@@ -301,6 +309,12 @@ def test_recovery_applies_confirmed_fills_exactly_once(
     assert len(store.rows("fills")) == 1
     assert not store.unresolved()
     sdk.limit_order_ioc.assert_called_once()
+    import json
+
+    record = json.loads(store.rows("decision_records")[0]["payload_json"])
+    assert record["execution_status"] == "FILLED"
+    assert D(record["executed_notional"]) == D("100.05")
+    assert record["executed_exposure"] is None  # No historical quote is invented on recovery.
 
 
 def test_executor_selection_is_explicit(cfg, store, adapter):
@@ -308,6 +322,29 @@ def test_executor_selection_is_explicit(cfg, store, adapter):
     assert isinstance(make_executor("live", cfg, store, {"main": adapter}), CoinbaseLiveExecutor)
     with pytest.raises(SafetyError):
         make_executor("unknown", cfg, store, {"main": adapter})
+
+
+def test_decision_summary_and_fill_accounting_rollback_together(
+    cfg,
+    store,
+    adapter,
+    actual,
+    ledger,
+    intent,
+):
+    import sqlite3
+
+    initialize(store, cfg, actual, ledger, intent)
+    store.decision_record(
+        intent.cycle_id, "paper", "main", intent.product_id, execution_status="PENDING"
+    )
+    store.db.execute("""CREATE TRIGGER unavailable_audit BEFORE UPDATE ON decision_records
+                        BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END""")
+    with pytest.raises(sqlite3.IntegrityError):
+        PaperExecutor(cfg, store, {"main": adapter}).execute(intent, lambda x: x)
+    assert not store.rows("fills") and not store.rows("orders")
+    assert store.ledger("paper", "main") == ledger
+    assert len(store.unresolved()) == 1
 
 
 def test_new_zero_balance_asset_extends_paper_ledger(cfg, store, adapter, actual, ledger):

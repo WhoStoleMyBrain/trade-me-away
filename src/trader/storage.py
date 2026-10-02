@@ -472,6 +472,23 @@ class Storage:
                     "UPDATE exchange_state SET state_json=? WHERE portfolio=?",
                     (dumps(exchange), intent.portfolio),
                 )
+            # Keep decision summaries consistent even when maintenance finishes an interrupted
+            # order. This shares the fill/ledger transaction; never fabricate a post-trade quote.
+            notional = sum((f.base_size * f.price for f in result.fills), ZERO)
+            self.db.execute(
+                "UPDATE decision_records SET payload_json=json_set(payload_json,"
+                "'$.execution_status',?,'$.execution',json(?),'$.executed_notional',?) "
+                "WHERE cycle_id=? AND mode=? AND portfolio=? AND product_id=?",
+                (
+                    result.status,
+                    dumps(result),
+                    str(notional) if result.terminal else None,
+                    intent.cycle_id,
+                    intent.mode,
+                    intent.portfolio,
+                    intent.product_id,
+                ),
+            )
 
     def known_order_ids(self) -> set[str]:
         return {
