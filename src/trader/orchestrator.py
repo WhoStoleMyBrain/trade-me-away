@@ -106,7 +106,9 @@ class Orchestrator:
                 if not market.features or not market.product.tradable:
                     raise SafetyError("MARKET_STATE_INSUFFICIENT")
             if any(
-                p.equity <= 0 or p.daily_loss_fraction >= self.cfg.risk.max_daily_loss_fraction
+                p.equity <= 0
+                or p.daily_loss_fraction
+                >= self.cfg.portfolio_risk(p.portfolio).max_daily_loss_fraction
                 for p in states.values()
             ):
                 raise SafetyError("PORTFOLIO_PREFLIGHT_FAILED")
@@ -239,7 +241,8 @@ class Orchestrator:
                         raise SafetyError("PRE_EXECUTION_ABORT")
                     final = cap_refreshed_intent(intent, checked.intent, product)
                     if final.base_size < product.base_min_size or final.quote_size < max(
-                        product.quote_min_size, self.cfg.risk.min_order_notional
+                        product.quote_min_size,
+                        self.cfg.risk_for(intent.product_id, intent.portfolio).min_order_notional,
                     ):
                         raise SafetyError("PRE_EXECUTION_BELOW_MINIMUM")
                     stage = "execution"

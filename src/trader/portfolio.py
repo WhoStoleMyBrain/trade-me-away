@@ -29,6 +29,7 @@ def reconcile_actual(
     }
     reasons = []
     totals = account_totals(actual)
+    risk = cfg.portfolio_risk(actual.portfolio)
     if any(c not in allowed and D(v) != 0 for c, v in totals.items()):
         reasons.append("UNVALUED_ASSET")
     if actual.open_orders or any(b.hold > 0 for b in actual.balances.values()):
@@ -42,9 +43,7 @@ def reconcile_actual(
             reasons.append("PORTFOLIO_MAPPING_CHANGED")
         for currency in set(totals) | set(expected["balances"]):
             tolerance = (
-                cfg.risk.balance_tolerance_quote
-                if currency == "USDC"
-                else cfg.risk.balance_tolerance_base
+                risk.balance_tolerance_quote if currency == "USDC" else risk.balance_tolerance_base
             )
             if (
                 abs(D(totals.get(currency, "0")) - D(expected["balances"].get(currency, "0")))

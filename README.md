@@ -177,6 +177,15 @@ Known strategy cost basis includes buy fees; realized PnL deducts sell fees. The
 
 ## Risk and reconciliation
 
+Optional `risk_profiles` in `config.yaml` overrides individual `risk` fields per product:
+`risk_profiles: {BTC-USDC: {max_asset_exposure: "0.25", min_confidence: "0.75"}}`.
+Omitted values always inherit global `risk` defaults, including after you change those defaults.
+Unknown fields/products, null values and inconsistent merged limits fail configuration validation.
+Assets sharing one portfolio use the strictest configured portfolio exposure, daily loss,
+daily trade count and reconciliation tolerances; each asset limit must fit that shared ceiling.
+Account freshness uses the strictest asset setting in that portfolio. Overrides apply in both modes,
+including the refreshed assessment and execution verification.
+
 The model selects only INCREASE, DECREASE, HOLD, or EXIT and a bounded exposure target. Local Decimal
 arithmetic determines amounts, rounds to product increments, reserves estimated fees, and clamps
 to cash, holdings, exchange constraints, exposure and notional limits. It never buys more to satisfy

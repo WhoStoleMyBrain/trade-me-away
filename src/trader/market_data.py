@@ -109,7 +109,12 @@ class MarketData:
         now = utcnow()
         times = [a.observed_at for a in accounts.values()]
         for quote in quotes:
-            validate_quote(quote, now, self.cfg.risk.max_data_age_seconds)
+            max_age = min(
+                self.cfg.risk_for(a.product_id, a.portfolio).max_data_age_seconds
+                for a in self.cfg.enabled_assets
+                if a.product_id == quote.product_id
+            )
+            validate_quote(quote, now, max_age)
             times.append(quote.received_at)
         if (
             not times
@@ -117,7 +122,8 @@ class MarketData:
         ):
             raise SafetyError("SNAPSHOT_TIME_SKEW")
         if any(
-            (now - a.observed_at).total_seconds() > self.cfg.risk.max_data_age_seconds
+            (now - a.observed_at).total_seconds()
+            > self.cfg.portfolio_risk(a.portfolio).max_data_age_seconds
             or (now - a.observed_at).total_seconds() < -5
             for a in accounts.values()
         ):

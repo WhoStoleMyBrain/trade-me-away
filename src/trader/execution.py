@@ -114,10 +114,11 @@ class PaperExecutor(BaseExecutor):
 
         product = adapter.product(intent.product_id)
         quote = adapter.quote(intent.product_id)
-        validate_quote(quote, utcnow(), self.cfg.risk.max_data_age_seconds)
+        risk = self.cfg.risk_for(intent.product_id, intent.portfolio)
+        validate_quote(quote, utcnow(), risk.max_data_age_seconds)
         if (
-            abs(quote.mid / intent.reference_price - 1) > self.cfg.risk.max_price_move_fraction
-            or quote.spread_bps > self.cfg.risk.max_spread_bps
+            abs(quote.mid / intent.reference_price - 1) > risk.max_price_move_fraction
+            or quote.spread_bps > risk.max_spread_bps
         ):
             result = ExecutionResult(
                 order_id=None,
@@ -188,12 +189,13 @@ class CoinbaseLiveExecutor(BaseExecutor):
             ledger = seed_ledger(actual, self.cfg, paper=False)
             self.store.save_ledger(self.mode, actual.portfolio, ledger)
         ledger = self._extend_ledger_products(ledger, actual)
-        if abs(ledger.cash - actual.balances["USDC"].total) > self.cfg.risk.balance_tolerance_quote:
+        risk = self.cfg.portfolio_risk(actual.portfolio)
+        if abs(ledger.cash - actual.balances["USDC"].total) > risk.balance_tolerance_quote:
             raise SafetyError("STRATEGY_CASH_MISMATCH")
         positions = dict(ledger.positions)
         for pid, p in positions.items():
             quantity = actual.balances[pid.split("-")[0]].total
-            if abs(p.quantity - quantity) > self.cfg.risk.balance_tolerance_base:
+            if abs(p.quantity - quantity) > risk.balance_tolerance_base:
                 raise SafetyError("STRATEGY_POSITION_MISMATCH")
             # Coinbase is authoritative for available balances; preserve historical cost basis.
             positions[pid] = p.model_copy(update={"quantity": quantity})
@@ -348,6 +350,7 @@ class CoinbaseLiveExecutor(BaseExecutor):
     ) -> ExecutionResult:
         adapter = self.adapters[intent.portfolio]
         reason = "ORDER_OR_FILLS_NOT_VERIFIED"
+        risk = self.cfg.risk_for(intent.product_id, intent.portfolio)
         for attempt in range(self.cfg.execution.verification_attempts):
             try:
                 order = adapter.order(order_id)
@@ -404,9 +407,9 @@ class CoinbaseLiveExecutor(BaseExecutor):
                     # Quantity tolerance must never turn a missing dust fill into zero execution.
                     and count == len(fills)
                     and (filled > 0) == (reported_size > 0)
-                    and abs(filled - reported_size) <= self.cfg.risk.balance_tolerance_base
-                    and abs(fees - reported_fees) <= self.cfg.risk.balance_tolerance_quote
-                    and abs(value - reported_value) <= self.cfg.risk.balance_tolerance_quote
+                    and abs(filled - reported_size) <= risk.balance_tolerance_base
+                    and abs(fees - reported_fees) <= risk.balance_tolerance_quote
+                    and abs(value - reported_value) <= risk.balance_tolerance_quote
                     and (bool(fills) or reported_size == reported_value == reported_fees == 0)
                     and (
                         order.get("settled") is True
@@ -418,7 +421,7 @@ class CoinbaseLiveExecutor(BaseExecutor):
                     )
                     and (filled > 0 or order["status"] != "FILLED")
                 ):
-                    if filled > intent.base_size + self.cfg.risk.balance_tolerance_base and not (
+                    if filled > intent.base_size + risk.balance_tolerance_base and not (
                         intent.order_type == "market_ioc" and intent.side == "BUY"
                     ):
                         return self._unknown(intent, order_id, "OVERFILL")
@@ -434,7 +437,7 @@ class CoinbaseLiveExecutor(BaseExecutor):
                             "FILLED"
                             if order["status"] == "FILLED"
                             and (
-                                filled + self.cfg.risk.balance_tolerance_base >= intent.base_size
+                                filled + risk.balance_tolerance_base >= intent.base_size
                                 or intent.order_type == "market_ioc"
                                 and intent.side == "BUY"
                             )

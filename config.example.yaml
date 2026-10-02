@@ -57,6 +57,11 @@ risk:
   balance_tolerance_base: "0.00000001"
   balance_tolerance_quote: "0.01"
 
+# Optional sparse overrides: all omitted values continue to inherit from risk above.
+risk_profiles: {}
+# risk_profiles:
+#   BTC-USDC: {max_asset_exposure: "0.25", min_confidence: "0.75"}
+
 execution:
   order_type: limit_ioc
   # Must cover the current Coinbase taker tier (checked on every account refresh).

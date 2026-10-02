@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import yaml
 from dotenv import dotenv_values
@@ -177,12 +177,53 @@ class AppConfig(ConfigModel):
     assets: list[AssetConfig] = Field(min_length=1)
     market: MarketConfig = Field(default_factory=MarketConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
+    risk_profiles: dict[str, dict[str, Any]] = Field(default_factory=dict)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
 
     @property
     def enabled_assets(self) -> list[AssetConfig]:
         return [a for a in self.assets if a.enabled]
+
+    def asset_risk(self, product_id: str, portfolio: str) -> RiskConfig:
+        return RiskConfig.model_validate(
+            self.risk.model_dump() | self.risk_profiles.get(product_id, {})
+        )
+
+    def portfolio_risk(self, portfolio: str) -> RiskConfig:
+        policies = [
+            self.asset_risk(a.product_id, portfolio)
+            for a in self.enabled_assets
+            if a.portfolio == portfolio
+        ]
+        values = self.risk.model_dump()
+        for name in (
+            "max_portfolio_exposure",
+            "max_daily_loss_fraction",
+            "max_trades_per_day",
+            "max_data_age_seconds",
+            "balance_tolerance_base",
+            "balance_tolerance_quote",
+        ):
+            values[name] = min(getattr(p, name) for p in policies)
+        # This object supplies portfolio-wide fields; per-asset sizing is resolved below.
+        values["max_asset_exposure"] = min(
+            values["max_asset_exposure"], values["max_portfolio_exposure"]
+        )
+        return RiskConfig.model_validate(values)
+
+    def risk_for(self, product_id: str, portfolio: str) -> RiskConfig:
+        values = self.asset_risk(product_id, portfolio).model_dump()
+        shared = self.portfolio_risk(portfolio)
+        for name in (
+            "max_portfolio_exposure",
+            "max_daily_loss_fraction",
+            "max_trades_per_day",
+            "balance_tolerance_base",
+            "balance_tolerance_quote",
+        ):
+            values[name] = getattr(shared, name)
+        return RiskConfig.model_validate(values)
 
     @model_validator(mode="after")
     def mappings(self) -> AppConfig:
@@ -191,6 +232,12 @@ class AppConfig(ConfigModel):
             raise ValueError("enabled products must be nonempty and unique")
         if {a.portfolio for a in assets} != set(self.portfolios):
             raise ValueError("every portfolio must map to an enabled asset and vice versa")
+        if set(self.risk_profiles) - {a.product_id for a in self.assets}:
+            raise ValueError("risk profile references an unknown product")
+        for overrides in self.risk_profiles.values():
+            RiskConfig.model_validate(self.risk.model_dump() | overrides)
+        for asset in assets:
+            self.risk_for(asset.product_id, asset.portfolio)
         return self
 
 

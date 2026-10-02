@@ -57,6 +57,7 @@ def build_payload(
             {
                 "product_id": asset.product_id,
                 "portfolio": asset.portfolio,
+                "risk_limits": cfg.risk_for(asset.product_id, asset.portfolio),
                 "price": market.quote.mid,
                 "quote_time": market.quote.observed_at,
                 "spread_bps": market.quote.spread_bps,

@@ -38,7 +38,7 @@ def assess(
     decision_at: datetime | None = None,
 ) -> RiskResult:
     """Pure deterministic sizing. No network, storage, or model calls."""
-    risk, execution = cfg.risk, cfg.execution
+    risk, execution = cfg.risk_for(product.product_id, portfolio.portfolio), cfg.execution
     reasons = []
     if decision.product_id != product.product_id or quote.product_id != product.product_id:
         reasons.append("PRODUCT_MISMATCH")
