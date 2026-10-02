@@ -15,6 +15,7 @@ from trader.util import D
 
 Mode = Literal["paper", "live"]
 EnvName = Annotated[str, Field(pattern=r"^[A-Z][A-Z0-9_]*$")]
+StrategyName = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{0,39}$")]
 PositiveMoney = Annotated[D, Field(gt=0, allow_inf_nan=False)]
 Fraction = Annotated[D, Field(ge=0, le=1, allow_inf_nan=False)]
 GRANULARITIES = {
@@ -52,6 +53,7 @@ class PortfolioConfig(ConfigModel):
     api_key_env: EnvName
     api_secret_env: EnvName
     paper_initial_usdc: PositiveMoney = D("1000")
+    strategy: StrategyName = "default"
 
     @model_validator(mode="after")
     def distinct_references(self) -> PortfolioConfig:
@@ -173,6 +175,18 @@ class LLMConfig(ConfigModel):
         return self
 
 
+class StrategyConfig(ConfigModel):
+    cadence_minutes: Literal[30, 60, 180] = 180
+    offset_minutes: int = Field(default=5, ge=0)
+    decision_references: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def schedule(self) -> StrategyConfig:
+        if self.offset_minutes >= self.cadence_minutes:
+            raise ValueError("schedule offset must be smaller than cadence")
+        return self
+
+
 class AppConfig(ConfigModel):
     portfolios: dict[str, PortfolioConfig] = Field(min_length=1)
     assets: list[AssetConfig] = Field(min_length=1)
@@ -180,6 +194,9 @@ class AppConfig(ConfigModel):
     risk: RiskConfig = Field(default_factory=RiskConfig)
     risk_profiles: dict[str, dict[str, Any]] = Field(default_factory=dict)
     decision_references: dict[str, str] = Field(default_factory=dict)
+    strategies: dict[StrategyName, StrategyConfig] = Field(
+        default_factory=lambda: {"default": StrategyConfig()}
+    )
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
 
@@ -202,10 +219,35 @@ class AppConfig(ConfigModel):
         """One explicit model context for each duplicated product; singletons need no setup."""
         result = {}
         for asset in self.enabled_assets:
-            reference = self.decision_references.get(asset.product_id, asset.portfolio)
+            strategy = self.portfolios[asset.portfolio].strategy
+            reference = self.references(strategy).get(asset.product_id, asset.portfolio)
             if asset.portfolio == reference:
-                result[asset.product_id] = asset
+                result.setdefault(asset.product_id, asset)
         return list(result.values())
+
+    @property
+    def strategy_names(self) -> list[str]:
+        return sorted({p.strategy for p in self.portfolios.values()})
+
+    def references(self, strategy: str) -> dict[str, str]:
+        return (self.decision_references if strategy == "default" else {}) | (
+            self.strategies[strategy].decision_references
+        )
+
+    def for_strategy(self, strategy: str) -> AppConfig:
+        if strategy not in self.strategy_names:
+            raise SafetyError("STRATEGY_NOT_CONFIGURED")
+        data = self.model_dump()
+        data["portfolios"] = {
+            n: p for n, p in data["portfolios"].items() if p["strategy"] == strategy
+        }
+        data["assets"] = [a for a in data["assets"] if a["portfolio"] in data["portfolios"]]
+        products = {a["product_id"] for a in data["assets"]}
+        data["risk_profiles"] = {p: r for p, r in data["risk_profiles"].items() if p in products}
+        data["strategies"] = {strategy: data["strategies"][strategy]}
+        if strategy != "default":
+            data["decision_references"] = {}
+        return AppConfig.model_validate(data)
 
     def portfolio_risk(self, portfolio: str) -> RiskConfig:
         policies = [
@@ -250,15 +292,30 @@ class AppConfig(ConfigModel):
         if {a.portfolio for a in assets} != set(self.portfolios):
             raise ValueError("every portfolio must map to an enabled asset and vice versa")
         products = {a.product_id for a in assets}
-        if set(self.decision_references) - products:
-            raise ValueError("decision reference names an unknown enabled product")
+        if set(self.strategy_names) - set(self.strategies):
+            raise ValueError("portfolio references an unknown strategy")
+        for strategy in self.strategies:
+            if strategy == "default" and any(
+                self.decision_references[p] != ref
+                for p, ref in self.strategies[strategy].decision_references.items()
+                if p in self.decision_references
+            ):
+                raise ValueError("conflicting default decision references")
+            members = [a for a in assets if self.portfolios[a.portfolio].strategy == strategy]
+            references = self.references(strategy)
+            if set(references) - {a.product_id for a in members}:
+                raise ValueError("decision reference names an unknown enabled product")
+            for product in {a.product_id for a in members}:
+                variants = [a for a in members if a.product_id == product]
+                reference = references.get(product)
+                if len(variants) > 1 and reference is None:
+                    raise ValueError("duplicated products require an explicit reference portfolio")
+                if reference is not None and reference not in {a.portfolio for a in variants}:
+                    raise ValueError("reference portfolio does not map to this product")
+        if "default" not in self.strategies and self.decision_references:
+            raise ValueError("top-level decision references belong to default strategy")
         for product in products:
             variants = [a for a in assets if a.product_id == product]
-            reference = self.decision_references.get(product)
-            if len(variants) > 1 and reference is None:
-                raise ValueError("duplicated products require an explicit reference portfolio")
-            if reference is not None and reference not in {a.portfolio for a in variants}:
-                raise ValueError("reference portfolio does not map to this product")
             if len(variants) > 1 and any(
                 sum(a.portfolio == v.portfolio for a in assets) != 1 for v in variants
             ):

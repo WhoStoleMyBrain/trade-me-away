@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from uuid import uuid4
 
 from trader.config import AppConfig, Mode
@@ -12,20 +11,10 @@ from trader.market_data import MarketData
 from trader.portfolio import reconcile_actual, value_portfolio
 from trader.prompt import build_payload
 from trader.risk import assess, cap_refreshed_intent, reject
+from trader.scheduling import check_schedule, cycle_slot
 from trader.schemas import AccountState, Action, OrderIntent, PortfolioState, Quote
 from trader.storage import Storage
 from trader.util import ZERO, D, event, utcnow
-
-
-def cycle_slot(now: datetime) -> str:
-    return now.replace(hour=now.hour // 3 * 3, minute=0, second=0, microsecond=0).isoformat()
-
-
-def check_schedule(now: datetime) -> None:
-    boundary = datetime.fromisoformat(cycle_slot(now))
-    age = (now - boundary).total_seconds()
-    if not 300 <= age <= 1200:
-        raise SafetyError("OUTSIDE_SCHEDULE_WINDOW")
 
 
 class Orchestrator:
@@ -37,7 +26,10 @@ class Orchestrator:
         market: MarketData,
         llm: DecisionClient,
         executor: Executor,
+        strategy: str = "default",
     ):
+        self.full_cfg, self.all_adapters = cfg, market.adapters
+        self.strategy = strategy
         self.cfg, self.mode, self.store = cfg, mode, store
         self.market, self.llm, self.executor = market, llm, executor
 
@@ -65,9 +57,9 @@ class Orchestrator:
         for adapter in self.market.adapters.values():
             adapter.check_permissions(self.mode)
         recover_orders(
-            self.cfg,
+            self.full_cfg,
             self.store,
-            self.market.adapters,
+            self.all_adapters,
             allow_cancel=allow_cancel and self.mode == "live",
             env_file=self.executor.env_file,
         )
@@ -85,12 +77,28 @@ class Orchestrator:
         event("startup_checks_passed", cycle, self.mode)
 
     def run(self, *, scheduled: bool = False) -> str:
+        if self.strategy not in self.cfg.strategy_names:
+            raise SafetyError("STRATEGY_NOT_CONFIGURED")
+        if self.cfg.strategy_names != [self.strategy]:
+            self.cfg = self.full_cfg.for_strategy(self.strategy)
+            self.market = MarketData(
+                self.cfg, {n: self.all_adapters[n] for n in self.cfg.portfolios}, self.store
+            )
         start = utcnow()
+        schedule = self.cfg.strategies[self.strategy]
         if scheduled:
-            check_schedule(start)
+            check_schedule(start, schedule)
+        self.store.bind_strategies(self.full_cfg, self.mode)
         cycle = str(uuid4())
-        self.store.begin_cycle(cycle, cycle_slot(start), self.mode, self.cfg, start)
-        event("cycle_started", cycle, self.mode)
+        self.store.begin_cycle(
+            cycle,
+            cycle_slot(start, schedule, self.strategy),
+            self.mode,
+            self.cfg,
+            start,
+            self.strategy,
+        )
+        event("cycle_started", cycle, self.mode, strategy=self.strategy)
         stage = "startup"
         try:
             self.startup(cycle, allow_cancel=True)
@@ -138,6 +146,8 @@ class Orchestrator:
                     asset.product_id,
                     decision=decisions[asset.product_id],
                     reference_portfolio=references[asset.product_id],
+                    strategy=self.strategy,
+                    cadence_minutes=schedule.cadence_minutes,
                     decision_at=utcnow(),
                     reference_price=market.quote.mid,
                     quote_time=market.quote.observed_at,
@@ -186,6 +196,7 @@ class Orchestrator:
                     "risk_decision",
                     cycle,
                     self.mode,
+                    strategy=self.strategy,
                     product_id=asset.product_id,
                     portfolio=asset.portfolio,
                     status=risk.status,
@@ -316,7 +327,7 @@ class Orchestrator:
                 )
             stage = "completion"
             self.store.finish_cycle(cycle, "COMPLETED")
-            event("cycle_completed", cycle, self.mode)
+            event("cycle_completed", cycle, self.mode, strategy=self.strategy)
             return cycle
         except Exception as exc:
             reason = exc.code if isinstance(exc, SafetyError) else "UNEXPECTED_CYCLE_FAILURE"
@@ -329,5 +340,12 @@ class Orchestrator:
                 "cycle",
                 {"status": "REJECTED", "reasons": [reason], "details": details},
             )
-            event("cycle_failed_closed", cycle, self.mode, reason=reason, details=details)
+            event(
+                "cycle_failed_closed",
+                cycle,
+                self.mode,
+                strategy=self.strategy,
+                reason=reason,
+                details=details,
+            )
             raise SafetyError(reason, details=details) from None

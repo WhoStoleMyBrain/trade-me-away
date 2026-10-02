@@ -25,13 +25,16 @@ def main(argv: list[str] | None = None) -> int:
             "show-costs",
             "show-orders",
             "show-decisions",
+            "render-timers",
         ],
     )
     parser.add_argument(
         "--scheduled",
         action="store_true",
-        help="reject launches outside 00/03/... UTC + 5–20 minutes",
+        help="reject launches outside the configured strategy's UTC schedule window",
     )
+    parser.add_argument("--strategy", default="default", help="named decision strategy for run")
+    parser.add_argument("--output-dir", type=Path, default=Path("var/systemd"))
     args = parser.parse_args(argv)
     os.umask(0o077)
     configure_logging()
@@ -45,6 +48,11 @@ def main(argv: list[str] | None = None) -> int:
             banner = f"!!! {banner} — REAL ORDERS ENABLED !!!"
         print(banner, flush=True)
         env, cfg = load_config(args.env_file)
+        if args.command == "render-timers":
+            from trader.scheduling import render_timers
+
+            print(dumps({"timers": render_timers(cfg, args.output_dir)}))
+            return 0
         stage = "database"
         database = env.TRADER_DB.resolve()
         with process_lock(database.with_suffix(".lock")):
@@ -97,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 print(dumps({"status": "OK", "mode": mode, "unresolved_orders": []}))
                 return 0
+            store.bind_strategies(cfg, mode)
             from openai import OpenAI
 
             from trader.llm import DecisionClient
@@ -112,7 +121,13 @@ def main(argv: list[str] | None = None) -> int:
             llm = DecisionClient(client, cfg.llm, store)
             executor = make_executor(mode, cfg, store, adapters, args.env_file)
             service = Orchestrator(
-                cfg, mode, store, MarketData(cfg, adapters, store), llm, executor
+                cfg,
+                mode,
+                store,
+                MarketData(cfg, adapters, store),
+                llm,
+                executor,
+                strategy=args.strategy,
             )
             stage = args.command
             if args.command == "run":

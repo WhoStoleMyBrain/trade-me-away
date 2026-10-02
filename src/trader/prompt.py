@@ -31,6 +31,10 @@ Feature returns, distances, volatility and normalized ATR are fractions; RSI is 
 spread and slippage are basis points. Timeframe prefixes denote candle duration in seconds.
 Each timeframe's closed_at_epoch is its last closed candle endpoint. There is no raw candle history.
 Realized PnL and entry costs include fees where known. Unknown pre-strategy cost basis stays null.
+Decision cadence is a review interval, not a required holding period or a requirement to trade.
+Keep a medium-term perspective, generally 12-24 hours. At faster cadences, do not sell or reverse
+a position merely because of short-term noise; require evidence of a meaningful thesis change
+and an advantage after costs. This does not override local risk limits or justify ignoring losses.
 """
 
 
@@ -73,6 +77,10 @@ def build_payload(
     return dumps(
         {
             "as_of": now,
+            "decision_context": {
+                "cadence_minutes": cfg.strategies[cfg.strategy_names[0]].cadence_minutes,
+                "planning_horizon_hours": [12, 24],
+            },
             "assets": assets,
             "portfolios": {
                 name: {

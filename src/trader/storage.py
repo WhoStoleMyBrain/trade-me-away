@@ -87,6 +87,10 @@ class Storage:
                 PRIMARY KEY(cycle_id, portfolio, product_id),
                 FOREIGN KEY(cycle_id) REFERENCES trading_cycles(cycle_id)
             );
+            CREATE TABLE IF NOT EXISTS portfolio_strategies (
+                mode TEXT NOT NULL, portfolio TEXT NOT NULL, strategy TEXT NOT NULL,
+                PRIMARY KEY(mode, portfolio)
+            );
             CREATE TABLE IF NOT EXISTS exchange_state (
                 portfolio TEXT PRIMARY KEY, initialized_at TEXT NOT NULL,
                 state_json TEXT NOT NULL
@@ -136,6 +140,10 @@ class Storage:
             finally:
                 self.db.execute("PRAGMA foreign_keys=ON")
         self.db.execute("PRAGMA user_version=3")
+        if "strategy" not in {r[1] for r in self.db.execute("PRAGMA table_info(trading_cycles)")}:
+            self.db.execute(
+                "ALTER TABLE trading_cycles ADD COLUMN strategy TEXT NOT NULL DEFAULT 'default'"
+            )
         for table in sorted(AUDIT_TABLES):
             self.db.execute(f"""CREATE TABLE IF NOT EXISTS {table} (
                 id INTEGER PRIMARY KEY, cycle_id TEXT NOT NULL, mode TEXT NOT NULL,
@@ -178,13 +186,37 @@ class Storage:
                 (cycle, mode, utcnow().isoformat(), subject, dumps(payload)),
             )
 
-    def begin_cycle(self, cycle: str, slot: str, mode: str, config: Any, now: datetime) -> None:
+    def bind_strategies(self, cfg, mode: str) -> None:
+        with self.db:
+            for name, portfolio in cfg.portfolios.items():
+                row = self.db.execute(
+                    "SELECT strategy FROM portfolio_strategies WHERE mode=? AND portfolio=?",
+                    (mode, name),
+                ).fetchone()
+                previous = row[0] if row else "default" if self.ledger(mode, name) else None
+                if previous is not None and previous != portfolio.strategy:
+                    raise SafetyError("PORTFOLIO_STRATEGY_CHANGED")
+                self.db.execute(
+                    "INSERT OR IGNORE INTO portfolio_strategies VALUES(?,?,?)",
+                    (mode, name, portfolio.strategy),
+                )
+
+    def begin_cycle(
+        self,
+        cycle: str,
+        slot: str,
+        mode: str,
+        config: Any,
+        now: datetime,
+        strategy: str = "default",
+    ) -> None:
         try:
             with self.db:
                 self.db.execute(
                     """INSERT INTO trading_cycles
-                    (cycle_id,slot,mode,started_at,status,config_json) VALUES(?,?,?,?,?,?)""",
-                    (cycle, slot, mode, now.isoformat(), "RUNNING", dumps(config)),
+                    (cycle_id,slot,mode,started_at,status,config_json,strategy)
+                    VALUES(?,?,?,?,?,?,?)""",
+                    (cycle, slot, mode, now.isoformat(), "RUNNING", dumps(config), strategy),
                 )
         except sqlite3.IntegrityError:
             raise SafetyError("DUPLICATE_CYCLE") from None
@@ -494,6 +526,15 @@ class Storage:
         }
         if table not in allowed:
             raise ValueError("unknown table")
+        if table == "api_usage":
+            return [
+                dict(r)
+                for r in self.db.execute(
+                    "SELECT u.*,c.strategy FROM api_usage u LEFT JOIN trading_cycles c "
+                    "ON c.cycle_id=u.cycle_id ORDER BY u.rowid DESC LIMIT ?",
+                    (limit,),
+                )
+            ]
         return [
             dict(r)
             for r in self.db.execute(f"SELECT * FROM {table} ORDER BY rowid DESC LIMIT ?", (limit,))

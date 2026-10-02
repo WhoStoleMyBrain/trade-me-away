@@ -391,6 +391,44 @@ attempts and outstanding verification reasons.
 
 ## systemd installation
 
+Existing installations can keep their three-hour timer unchanged. For cadence experiments, add
+named strategies and assign each new portfolio a `strategy` (omission means `default`):
+
+```yaml
+strategies:
+  default: {cadence_minutes: 180, offset_minutes: 5}
+  hourly: {cadence_minutes: 60, offset_minutes: 10}
+  halfhour: {cadence_minutes: 30, offset_minutes: 15}
+# Under portfolios.btc_hourly, alongside its credential references:
+# strategy: hourly
+```
+
+Each portfolio belongs to one strategy. Existing ledgers remain bound to their original strategy;
+use new portfolios for cadence experiments. Risk A/B references for a named strategy go under
+`strategies.<name>.decision_references`. The top-level references apply to `default`.
+Each strategy makes one joint multi-asset model request per cycle; independent cadences make
+independent decisions. The prompt names the review interval while retaining a 12–24h perspective
+and discouraging noise-driven exits. Risk cooldown/trade-count defaults do **not** change with cadence.
+
+Manual run: `python -m trader run --strategy hourly`. Generate timers directly from configuration:
+
+```bash
+python -m trader render-timers --output-dir var/systemd
+sudo cp deploy/systemd/crypto-trader@.service /etc/systemd/system/
+sudo cp var/systemd/crypto-trader@*.timer /etc/systemd/system/
+sudo systemctl disable --now crypto-trader.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now crypto-trader@default.timer crypto-trader@hourly.timer crypto-trader@halfhour.timer
+```
+
+Enable only configured strategies, and inspect generated units before installation. Regenerate
+timers after cadence changes; disable removed timers and remove their generated files before
+copying again. All instances read the same `.env`, `config.yaml` and database; keep the one existing
+15-minute order-maintenance timer. Stagger offsets as above: the shared lock deliberately refuses
+overlapping runs (`CYCLE_ALREADY_RUNNING`), so watch for missed cycles if runs take longer than the
+gap. There is no catch-up trading after downtime. Cycle IDs/strategy names and per-portfolio records
+separate the audit trail; the API budget remains a shared ceiling across every strategy and mode.
+
 Install the project and virtual environment at `/opt/crypto-trader`, or update the absolute paths in
 the provided service. Keep `.env` and `config.yaml` there. On the Linux host:
 

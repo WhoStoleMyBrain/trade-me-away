@@ -24,6 +24,12 @@ market:
   max_snapshot_skew_seconds: 90
   candle_close_grace_seconds: 180
 
+# Assign each portfolio a strategy; omission keeps it in default.
+strategies:
+  default: {cadence_minutes: 180, offset_minutes: 5}
+# hourly: {cadence_minutes: 60, offset_minutes: 10}
+# halfhour: {cadence_minutes: 30, offset_minutes: 15}
+
 llm:
   model: gpt-6-luna
   reasoning_effort: medium
