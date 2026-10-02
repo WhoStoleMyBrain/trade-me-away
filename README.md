@@ -429,6 +429,32 @@ every three hours. No systemd changes are applied automatically by installing th
 
 ## Adding another cryptocurrency or portfolio
 
+Risk-policy A/B tests use distinct Coinbase portfolios (also in paper mode), each holding only
+the tested asset. Keep their aliases stable: those aliases identify separate strategy ledgers.
+Add both portfolios under `portfolios` with separate `.env` credential/portfolio references, then:
+
+```yaml
+assets:
+  - {product_id: BTC-USDC, portfolio: btc_reference}
+  - product_id: BTC-USDC
+    portfolio: btc_variant
+    risk: {max_order_notional: "50", max_asset_exposure: "0.20"}
+decision_references: {BTC-USDC: btc_reference}
+```
+
+Inheritance is `risk` defaults → `risk_profiles[product_id]` → the asset mapping's `risk` overrides.
+The model sees the explicitly selected reference portfolio and its policy/history once per asset;
+its identical decision is replayed into all variants. Each variant independently assesses that
+decision against its own holdings and policy. A direction conflict is rejected, never reversed;
+HOLD causes no rebalance. Logs and `show-decisions` identify both product and portfolio. Cost limits
+and the process lock remain shared. Reference policy influences the shared decision, so this
+compares local execution/risk policies, not independent model strategies.
+
+Back up the SQLite database with all services stopped before upgrading. Its order uniqueness
+constraint migrates automatically to `(cycle, portfolio, product)` without removing history.
+Older code cannot open the upgraded schema; restore a matching backup only for an intentional
+rollback, never to discard unresolved orders or reconcile discrepancies away.
+
 Add another `assets` entry with a tradable `BASE-USDC` product and its portfolio name. There is no
 three-asset limit. A new zero-balance product is added to an existing strategy ledger without resetting
 cash/history. Keep enough configured candles to cover all return horizons. Larger universes may

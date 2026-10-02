@@ -46,7 +46,7 @@ class MarketData:
         # Refresh every mapped asset to value shared portfolios consistently.
         with ThreadPoolExecutor(max_workers=min(8, len(self.cfg.enabled_assets) + 1)) as pool:
             accounts = pool.submit(self.accounts)
-            markets = dict(pool.map(fetch, self.cfg.enabled_assets))
+            markets = dict(pool.map(fetch, self.cfg.decision_assets))
             actual = accounts.result()
         self.validate_snapshot([q for _, q in markets.values()], actual)
         return markets, actual
@@ -88,7 +88,7 @@ class MarketData:
 
         with ThreadPoolExecutor(max_workers=min(8, len(self.cfg.enabled_assets) + 1)) as pool:
             account_future = pool.submit(self.accounts)
-            collected = list(pool.map(fetch, self.cfg.enabled_assets))
+            collected = list(pool.map(fetch, self.cfg.decision_assets))
             actual = account_future.result()
         markets = {}
         for pid, market, raw in collected:

@@ -11,10 +11,10 @@ from trader.llm import DecisionClient
 from trader.market_data import MarketData
 from trader.portfolio import reconcile_actual, value_portfolio
 from trader.prompt import build_payload
-from trader.risk import assess, cap_refreshed_intent
-from trader.schemas import AccountState, OrderIntent, PortfolioState, Quote
+from trader.risk import assess, cap_refreshed_intent, reject
+from trader.schemas import AccountState, Action, OrderIntent, PortfolioState, Quote
 from trader.storage import Storage
-from trader.util import ZERO, event, utcnow
+from trader.util import ZERO, D, event, utcnow
 
 
 def cycle_slot(now: datetime) -> str:
@@ -119,6 +119,15 @@ class Orchestrator:
             batch.validate_products(set(markets))
             decisions = {d.product_id: d for d in batch.decisions}
             decision_at = min(m.as_of for m in markets.values())
+            references = {a.product_id: a.portfolio for a in self.cfg.decision_assets}
+            invalid_direction = set()
+            for pid, decision in decisions.items():
+                exposure = states[references[pid]].exposure(pid, markets[pid].quote.mid)
+                target = D(str(decision.target_exposure))
+                if (decision.action == Action.INCREASE and target <= exposure) or (
+                    decision.action in (Action.DECREASE, Action.EXIT) and target >= exposure
+                ):
+                    invalid_direction.add(pid)
             # Persist every decision before execution, including HOLD and assets skipped on failure.
             for asset in self.cfg.enabled_assets:
                 market = markets[asset.product_id]
@@ -128,6 +137,7 @@ class Orchestrator:
                     asset.portfolio,
                     asset.product_id,
                     decision=decisions[asset.product_id],
+                    reference_portfolio=references[asset.product_id],
                     decision_at=utcnow(),
                     reference_price=market.quote.mid,
                     quote_time=market.quote.observed_at,
@@ -155,6 +165,8 @@ class Orchestrator:
                     decision_at=decision_at,
                     budget_ok=budget_available(self.store, self.cfg.llm, utcnow()),
                 )
+                if asset.product_id in invalid_direction:
+                    risk = reject("REFERENCE_ACTION_TARGET_CONFLICT")
                 self.store.audit(
                     "risk_results",
                     cycle,

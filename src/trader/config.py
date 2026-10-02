@@ -64,6 +64,7 @@ class AssetConfig(ConfigModel):
     product_id: str = Field(pattern=r"^[A-Z0-9]+-USDC$")
     portfolio: str
     enabled: bool = True
+    risk: dict[str, Any] = Field(default_factory=dict)
 
 
 class CandleConfig(ConfigModel):
@@ -178,6 +179,7 @@ class AppConfig(ConfigModel):
     market: MarketConfig = Field(default_factory=MarketConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     risk_profiles: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    decision_references: dict[str, str] = Field(default_factory=dict)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
 
@@ -186,9 +188,24 @@ class AppConfig(ConfigModel):
         return [a for a in self.assets if a.enabled]
 
     def asset_risk(self, product_id: str, portfolio: str) -> RiskConfig:
-        return RiskConfig.model_validate(
-            self.risk.model_dump() | self.risk_profiles.get(product_id, {})
+        asset = next(
+            a
+            for a in self.enabled_assets
+            if a.product_id == product_id and a.portfolio == portfolio
         )
+        return RiskConfig.model_validate(
+            self.risk.model_dump() | self.risk_profiles.get(product_id, {}) | asset.risk
+        )
+
+    @property
+    def decision_assets(self) -> list[AssetConfig]:
+        """One explicit model context for each duplicated product; singletons need no setup."""
+        result = {}
+        for asset in self.enabled_assets:
+            reference = self.decision_references.get(asset.product_id, asset.portfolio)
+            if asset.portfolio == reference:
+                result[asset.product_id] = asset
+        return list(result.values())
 
     def portfolio_risk(self, portfolio: str) -> RiskConfig:
         policies = [
@@ -228,10 +245,24 @@ class AppConfig(ConfigModel):
     @model_validator(mode="after")
     def mappings(self) -> AppConfig:
         assets = self.enabled_assets
-        if not assets or len({a.product_id for a in assets}) != len(assets):
-            raise ValueError("enabled products must be nonempty and unique")
+        if not assets or len({(a.portfolio, a.product_id) for a in assets}) != len(assets):
+            raise ValueError("enabled portfolio/product pairs must be nonempty and unique")
         if {a.portfolio for a in assets} != set(self.portfolios):
             raise ValueError("every portfolio must map to an enabled asset and vice versa")
+        products = {a.product_id for a in assets}
+        if set(self.decision_references) - products:
+            raise ValueError("decision reference names an unknown enabled product")
+        for product in products:
+            variants = [a for a in assets if a.product_id == product]
+            reference = self.decision_references.get(product)
+            if len(variants) > 1 and reference is None:
+                raise ValueError("duplicated products require an explicit reference portfolio")
+            if reference is not None and reference not in {a.portfolio for a in variants}:
+                raise ValueError("reference portfolio does not map to this product")
+            if len(variants) > 1 and any(
+                sum(a.portfolio == v.portfolio for a in assets) != 1 for v in variants
+            ):
+                raise ValueError("each risk variant requires its own single-asset portfolio")
         if set(self.risk_profiles) - {a.product_id for a in self.assets}:
             raise ValueError("risk profile references an unknown product")
         for overrides in self.risk_profiles.values():

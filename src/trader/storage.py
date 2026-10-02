@@ -48,7 +48,7 @@ class Storage:
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1, 2):
+        if version not in (0, 1, 2, 3):
             raise SafetyError("DATABASE_VERSION_UNSUPPORTED")
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS trading_cycles (
@@ -60,7 +60,7 @@ class Storage:
                 client_order_id TEXT PRIMARY KEY, cycle_id TEXT NOT NULL, mode TEXT NOT NULL,
                 portfolio TEXT NOT NULL, product_id TEXT NOT NULL, created_at TEXT NOT NULL,
                 status TEXT NOT NULL, intent_json TEXT NOT NULL,
-                UNIQUE(cycle_id, product_id),
+                UNIQUE(cycle_id, portfolio, product_id),
                 FOREIGN KEY(cycle_id) REFERENCES trading_cycles(cycle_id)
             );
             CREATE TABLE IF NOT EXISTS orders (
@@ -113,8 +113,29 @@ class Storage:
             );
             CREATE INDEX IF NOT EXISTS cancellations_client
                 ON cancellation_attempts(client_order_id);
-            PRAGMA user_version=2;
         """)
+        if version in (1, 2):
+            # Rebuild only the uniqueness constraint; keep every intent and all child records.
+            # Foreign keys are checked inside the transaction before accepting the migration.
+            self.db.execute("PRAGMA foreign_keys=OFF")
+            try:
+                with self.db:
+                    self.db.execute("BEGIN IMMEDIATE")
+                    self.db.execute("""CREATE TABLE order_intents_new (
+                        client_order_id TEXT PRIMARY KEY, cycle_id TEXT NOT NULL,
+                        mode TEXT NOT NULL,
+                        portfolio TEXT NOT NULL, product_id TEXT NOT NULL, created_at TEXT NOT NULL,
+                        status TEXT NOT NULL, intent_json TEXT NOT NULL,
+                        UNIQUE(cycle_id, portfolio, product_id),
+                        FOREIGN KEY(cycle_id) REFERENCES trading_cycles(cycle_id))""")
+                    self.db.execute("INSERT INTO order_intents_new SELECT * FROM order_intents")
+                    self.db.execute("DROP TABLE order_intents")
+                    self.db.execute("ALTER TABLE order_intents_new RENAME TO order_intents")
+                    if self.db.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                        raise SafetyError("DATABASE_FOREIGN_KEY_FAILED")
+            finally:
+                self.db.execute("PRAGMA foreign_keys=ON")
+        self.db.execute("PRAGMA user_version=3")
         for table in sorted(AUDIT_TABLES):
             self.db.execute(f"""CREATE TABLE IF NOT EXISTS {table} (
                 id INTEGER PRIMARY KEY, cycle_id TEXT NOT NULL, mode TEXT NOT NULL,

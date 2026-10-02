@@ -59,6 +59,7 @@ risk:
 
 # Optional sparse overrides: all omitted values continue to inherit from risk above.
 risk_profiles: {}
+decision_references: {}
 # risk_profiles:
 #   BTC-USDC: {max_asset_exposure: "0.25", min_confidence: "0.75"}
 

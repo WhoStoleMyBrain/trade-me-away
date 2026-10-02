@@ -44,15 +44,17 @@ def build_payload(
 ) -> str:
     # Only actual fills are history. Previous model rationale text never enters this payload.
     rows = store.db.execute(
-        """SELECT fill_json FROM fills WHERE mode=? AND trade_time>=?""",
+        """SELECT portfolio,fill_json FROM fills WHERE mode=? AND trade_time>=?""",
         (mode, (now - timedelta(hours=24)).isoformat()),
     ).fetchall()
-    recent = [Fill.model_validate(json.loads(r[0])) for r in rows]
+    recent = [(r[0], Fill.model_validate(json.loads(r[1]))) for r in rows]
     assets = []
-    for asset in sorted(cfg.enabled_assets, key=lambda a: a.product_id):
+    for asset in sorted(cfg.decision_assets, key=lambda a: a.product_id):
         market, portfolio = markets[asset.product_id], portfolios[asset.portfolio]
         position = portfolio.positions[asset.product_id]
-        fills = [f for f in recent if f.product_id == asset.product_id]
+        fills = [
+            f for name, f in recent if name == asset.portfolio and f.product_id == asset.product_id
+        ]
         assets.append(
             {
                 "product_id": asset.product_id,
@@ -81,6 +83,7 @@ def build_payload(
                     "order_attempts_today": p.trades_today,
                 }
                 for name, p in sorted(portfolios.items())
+                if name in {a.portfolio for a in cfg.decision_assets}
             },
             "cost_assumptions": {
                 "taker_fee_rate": cfg.execution.taker_fee_rate,
