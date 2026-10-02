@@ -26,6 +26,8 @@ def main(argv: list[str] | None = None) -> int:
             "show-orders",
             "show-decisions",
             "render-timers",
+            "track-outcomes",
+            "show-outcomes",
         ],
     )
     parser.add_argument(
@@ -75,11 +77,17 @@ def main(argv: list[str] | None = None) -> int:
                         "show-state": "strategy_state",
                         "show-orders": "orders",
                         "show-decisions": "decision_records",
+                        "show-outcomes": "decision_outcomes",
                     }[args.command]
                     result = {table: store.rows(table), "unresolved_orders": store.unresolved()}
                     if args.command == "show-orders":
                         result["cancellation_attempts"] = store.rows("cancellation_attempts")
                     print(dumps(result))
+                return 0
+            if args.command == "track-outcomes" and (
+                not cfg.outcomes.enabled or not store.pending_outcomes(mode, utcnow(), 1)
+            ):
+                print(dumps({"status": "OK" if cfg.outcomes.enabled else "DISABLED", "checked": 0}))
                 return 0
             if args.command == "maintain-orders" and not store.unresolved():
                 # Most maintenance invocations have no work. Avoid initializing SDKs or importing
@@ -91,6 +99,13 @@ def main(argv: list[str] | None = None) -> int:
 
             stage = "coinbase_setup"
             adapters = build_adapters(cfg, environment_values(args.env_file))
+            if args.command == "track-outcomes":
+                from trader.outcomes import track_outcomes
+
+                stage = "track-outcomes"
+                result = track_outcomes(cfg, store, adapters, mode, utcnow())
+                print(dumps(result))
+                return 1 if result["errors"] else 0
             if args.command == "maintain-orders":
                 stage = "maintain-orders"
                 # No market data, model request, budget gate or cycle slot needed to reduce
@@ -160,7 +175,10 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         # Never print an SDK exception or Pydantic error containing environment input.
         reason = exc.code if isinstance(exc, SafetyError) else "STARTUP_OR_CONFIGURATION_FAILED"
-        if args.command == "maintain-orders" and reason == "CYCLE_ALREADY_RUNNING":
+        if (
+            args.command in ("maintain-orders", "track-outcomes")
+            and reason == "CYCLE_ALREADY_RUNNING"
+        ):
             print(dumps({"status": "BUSY", "reason": reason}), flush=True)
             return 0  # The next maintenance tick will retry without overlapping a trading cycle.
         details = {"stage": stage, **error_details(exc)}

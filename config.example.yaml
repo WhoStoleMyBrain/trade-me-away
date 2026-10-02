@@ -83,3 +83,8 @@ execution:
   max_order_age_seconds: 120
   cancel_retry_seconds: 60
   max_cancel_attempts: 3
+
+# Read-only historical price tracking; run via the separate hourly outcomes timer.
+outcomes:
+  enabled: true
+  max_decisions_per_run: 100

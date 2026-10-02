@@ -127,6 +127,7 @@ class Orchestrator:
             batch.validate_products(set(markets))
             decisions = {d.product_id: d for d in batch.decisions}
             decision_at = min(m.as_of for m in markets.values())
+            model_decision_at = utcnow()
             references = {a.product_id: a.portfolio for a in self.cfg.decision_assets}
             invalid_direction = set()
             for pid, decision in decisions.items():
@@ -148,7 +149,7 @@ class Orchestrator:
                     reference_portfolio=references[asset.product_id],
                     strategy=self.strategy,
                     cadence_minutes=schedule.cadence_minutes,
-                    decision_at=utcnow(),
+                    decision_at=model_decision_at,
                     reference_price=market.quote.mid,
                     quote_time=market.quote.observed_at,
                     initial_exposure=states[asset.portfolio].exposure(

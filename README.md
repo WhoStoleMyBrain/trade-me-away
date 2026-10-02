@@ -336,6 +336,24 @@ are local estimates, not invoices; review rates before changing models, tiers, o
 
 ## Audit and operations
 
+`python -m trader track-outcomes` collects historical outcomes for recorded decisions, including
+HOLD and rejected trades; `python -m trader show-outcomes` displays them. This separate read-only
+job uses no model calls, order submission, indicators or account changes. It backfills +1/+3/+6/+12/+24h
+returns from the recorded quote midpoint and 24h favorable/adverse excursions on a **long asset price**
+basis (not trade PnL or an automatic verdict about SELL/HOLD). Returns are fractions, before costs.
+Each horizon uses the five-minute candle closing at or immediately before the target timestamp;
+the exact observation time/offset is stored. Excursions exclude partial boundary candles, so the
+first/last fraction of five minutes is not observed. Missing/invalid candles remain explicitly
+incomplete and retry later; completed observations are retained. Delayed jobs use historical candles,
+not the current price. Tracking starts with the new decision records; older logs are not reconstructed.
+
+Install `deploy/systemd/crypto-trader-outcomes.service` and `.timer` alongside the existing units,
+then enable `crypto-trader-outcomes.timer` for automatic hourly collection at :25 UTC. It shares the
+database lock and yields if trading is busy. `outcomes.enabled: false` disables collection;
+`outcomes.max_decisions_per_run` (default 100) bounds each batch. If `batch_limit_reached` persists,
+check backlog/service duration before increasing it. The job reports partial-data/API failures
+separately from trading; keep its timer enabled long enough to finish the last 24h observations.
+
 `python -m trader show-decisions` shows the latest per-portfolio decision records, including HOLDs,
 initial/refreshed risk assessments, the final executable intent, fills and verified post-trade
 exposure. Requested and approved notionals use the continuous sizing calculation at the execution
@@ -441,9 +459,11 @@ sudo install -m 0644 deploy/systemd/crypto-trader.service /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/crypto-trader.timer /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/crypto-trader-orders.service /etc/systemd/system/
 sudo install -m 0644 deploy/systemd/crypto-trader-orders.timer /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/crypto-trader-outcomes.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/crypto-trader-outcomes.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo -u crypto-trader /opt/crypto-trader/.venv/bin/python -m trader doctor
-sudo systemctl enable --now crypto-trader.timer crypto-trader-orders.timer
+sudo systemctl enable --now crypto-trader.timer crypto-trader-orders.timer crypto-trader-outcomes.timer
 systemctl list-timers 'crypto-trader*'
 ```
 

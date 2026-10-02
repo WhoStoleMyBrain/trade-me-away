@@ -187,6 +187,11 @@ class StrategyConfig(ConfigModel):
         return self
 
 
+class OutcomeConfig(ConfigModel):
+    enabled: bool = True
+    max_decisions_per_run: int = Field(default=100, ge=1, le=1000)
+
+
 class AppConfig(ConfigModel):
     portfolios: dict[str, PortfolioConfig] = Field(min_length=1)
     assets: list[AssetConfig] = Field(min_length=1)
@@ -199,6 +204,7 @@ class AppConfig(ConfigModel):
     )
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    outcomes: OutcomeConfig = Field(default_factory=OutcomeConfig)
 
     @property
     def enabled_assets(self) -> list[AssetConfig]:

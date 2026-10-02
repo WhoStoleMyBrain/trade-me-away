@@ -5,7 +5,7 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -91,6 +91,14 @@ class Storage:
                 mode TEXT NOT NULL, portfolio TEXT NOT NULL, strategy TEXT NOT NULL,
                 PRIMARY KEY(mode, portfolio)
             );
+            CREATE TABLE IF NOT EXISTS decision_outcomes (
+                cycle_id TEXT NOT NULL, mode TEXT NOT NULL, portfolio TEXT NOT NULL,
+                product_id TEXT NOT NULL, status TEXT NOT NULL, next_check_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, payload_json TEXT NOT NULL,
+                PRIMARY KEY(cycle_id, portfolio, product_id),
+                FOREIGN KEY(cycle_id, portfolio, product_id)
+                    REFERENCES decision_records(cycle_id, portfolio, product_id)
+            );
             CREATE TABLE IF NOT EXISTS exchange_state (
                 portfolio TEXT PRIMARY KEY, initialized_at TEXT NOT NULL,
                 state_json TEXT NOT NULL
@@ -157,6 +165,40 @@ class Storage:
 
     def close(self) -> None:
         self.db.close()
+
+    def pending_outcomes(self, mode: str, now: datetime, limit: int = 100) -> list[dict]:
+        return [
+            dict(r)
+            for r in self.db.execute(
+                "SELECT d.*,o.payload_json AS outcome_json FROM decision_records d "
+                "LEFT JOIN decision_outcomes o USING(cycle_id,portfolio,product_id) "
+                "WHERE d.mode=? AND d.created_at<=? AND "
+                "(o.cycle_id IS NULL OR (o.status!='COMPLETE' AND o.next_check_at<=?)) "
+                "ORDER BY COALESCE(o.updated_at,''),d.created_at,d.portfolio LIMIT ?",
+                (mode, (now - timedelta(hours=1, minutes=3)).isoformat(), now.isoformat(), limit),
+            )
+        ]
+
+    def save_outcome(
+        self, row: dict, status: str, next_check: datetime, payload: dict, now: datetime
+    ) -> None:
+        with self.db:
+            self.db.execute(
+                "INSERT INTO decision_outcomes VALUES(?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(cycle_id,portfolio,product_id) DO UPDATE SET "
+                "status=excluded.status,next_check_at=excluded.next_check_at,"
+                "updated_at=excluded.updated_at,payload_json=excluded.payload_json",
+                (
+                    row["cycle_id"],
+                    row["mode"],
+                    row["portfolio"],
+                    row["product_id"],
+                    status,
+                    next_check.isoformat(),
+                    now.isoformat(),
+                    dumps(payload),
+                ),
+            )
 
     def decision_record(
         self, cycle: str, mode: str, portfolio: str, product: str, **fields
@@ -513,6 +555,7 @@ class Storage:
 
     def rows(self, table: str, limit: int = 50) -> list[dict]:
         allowed = AUDIT_TABLES | {
+            "decision_outcomes",
             "decision_records",
             "trading_cycles",
             "strategy_state",
