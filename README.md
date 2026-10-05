@@ -316,7 +316,7 @@ HTTP timeouts do **not** cancel exchange orders. These controls have separate pu
 | `execution.max_order_age_seconds` | 120 seconds | An open strategy order becomes eligible for cancellation at the next recovery check after this age |
 | `execution.cancel_retry_seconds` | 60 seconds | Minimum interval between cancellation requests, always after another state/identity read |
 | `execution.max_cancel_attempts` | 3 per order | Bound cancellation attempts across restarts; verification continues after the cap |
-| `crypto-trader-orders.timer` | 15 minutes after each check completes | Recover unresolved orders between three-hour decision cycles and after reboot |
+| `crypto-trader-orders.timer` | Hourly at :02, :17, :32, :47 UTC | Recover unresolved orders between decision cycles |
 
 Install **both timers** below for unattended use. The recovery job runs
 `python -m trader maintain-orders`. It takes the same process lock, never calls OpenAI, never creates a new order, and
@@ -527,16 +527,27 @@ keys use the same parsing as the CLI. Only `var/` is writable under the hardened
 The timer runs at 00:05, 03:05, …, 21:05 **UTC**. `Persistent=false` prevents catching up missed
 triggers. `run --scheduled` also rejects launches outside boundary +5 through +20 minutes. There
 are no failure-triggered trading restarts. On a restart the trading timer waits for its next future
-trigger. The order-recovery timer starts after boot and runs 15 minutes after its previous check
-finishes, without scheduling a model decision. It reports BUSY and waits for its next tick if another
-command holds the lock. Its five-minute service limit bounds a hung check; durable intent/cancellation
-records allow the next check to resume verification safely. Monitor both services' failed statuses.
+trigger. Order recovery runs at :02, :17, :32 and :47 each hour UTC, without scheduling a model
+decision. After boot/restart it waits for the next fixed slot; it does not catch up missed checks.
+It reports BUSY and waits for its next tick if another command holds the lock. Its five-minute
+service limit bounds a hung check; durable intent/cancellation records allow the next check to
+resume verification safely. Fixed slots reduce overlap, but long-running jobs can still contend
+for the shared lock; trading currently fails rather than waits when the lock is busy. Monitor both
+services' failed statuses.
 
-When upgrading from the old minute schedule, copy the updated `crypto-trader-orders.timer` unit
-as above, then run `sudo systemctl daemon-reload` and
-`sudo systemctl restart crypto-trader-orders.timer`. Check `systemctl cat crypto-trader-orders.timer`
-for old local overrides: an existing drop-in can retain a faster interval. The trading timer remains
-every three hours. No systemd changes are applied automatically by installing the Python package.
+To apply the fixed order-recovery schedule, copy the updated timer file into the VM's project
+directory, then run from `/opt/crypto-trader` (no Python reinstall needed for a timer-only update):
+
+```bash
+sudo install -o root -g root -m 0644 deploy/systemd/crypto-trader-orders.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl restart crypto-trader-orders.timer
+sudo systemctl list-timers --all 'crypto-trader*.timer'
+```
+
+Check `systemctl cat crypto-trader-orders.timer` for old local overrides: a drop-in can retain
+additional boot/interval triggers. Leave `crypto-trader.timer` disabled when using the named
+strategy timers. No systemd changes are applied automatically by installing the Python package.
 
 ## Adding another cryptocurrency or portfolio
 

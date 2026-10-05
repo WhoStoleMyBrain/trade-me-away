@@ -1,10 +1,11 @@
 [Unit]
-Description=Check unresolved strategy orders every 15 minutes, including after reboot
+Description=Check unresolved strategy orders at :02, :17, :32 and :47 UTC
 
 [Timer]
-OnBootSec=30s
-OnUnitInactiveSec=15min
+OnCalendar=*-*-* *:02,17,32,47:00 UTC
 AccuracySec=30s
+RandomizedDelaySec=0
+Persistent=false
 Unit=crypto-trader-orders.service
 
 [Install]
