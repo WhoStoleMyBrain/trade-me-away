@@ -28,6 +28,8 @@ def main(argv: list[str] | None = None) -> int:
             "render-timers",
             "track-outcomes",
             "show-outcomes",
+            "record-deposit",
+            "show-deposits",
         ],
     )
     parser.add_argument(
@@ -37,6 +39,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--strategy", default="default", help="named decision strategy for run")
     parser.add_argument("--output-dir", type=Path, default=Path("var/systemd"))
+    parser.add_argument("--portfolio", help="configured portfolio name for record-deposit")
+    parser.add_argument("--amount", help="exact positive USDC deposit amount for record-deposit")
+    parser.add_argument(
+        "--reference", help="unique non-secret deposit reference for record-deposit"
+    )
     args = parser.parse_args(argv)
     os.umask(0o077)
     configure_logging()
@@ -50,6 +57,8 @@ def main(argv: list[str] | None = None) -> int:
             banner = f"!!! {banner} — REAL ORDERS ENABLED !!!"
         print(banner, flush=True)
         env, cfg = load_config(args.env_file)
+        if args.command == "record-deposit" and mode != "live":
+            raise SafetyError("DEPOSIT_REQUIRES_LIVE_MODE")
         if args.command == "render-timers":
             from trader.scheduling import render_timers
 
@@ -78,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
                         "show-orders": "orders",
                         "show-decisions": "decision_records",
                         "show-outcomes": "decision_outcomes",
+                        "show-deposits": "cash_deposits",
                     }[args.command]
                     result = {table: store.rows(table), "unresolved_orders": store.unresolved()}
                     if args.command == "show-orders":
@@ -99,6 +109,24 @@ def main(argv: list[str] | None = None) -> int:
 
             stage = "coinbase_setup"
             adapters = build_adapters(cfg, environment_values(args.env_file))
+            if args.command == "record-deposit":
+                from trader.funding import record_deposit
+
+                stage = "record-deposit"
+                print(
+                    dumps(
+                        record_deposit(
+                            cfg,
+                            store,
+                            adapters,
+                            args.portfolio,
+                            args.amount,
+                            args.reference,
+                            args.env_file,
+                        )
+                    )
+                )
+                return 0
             if args.command == "track-outcomes":
                 from trader.outcomes import track_outcomes
 

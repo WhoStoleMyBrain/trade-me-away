@@ -45,6 +45,7 @@ def isolated(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     import trader.coinbase_client
     import trader.execution
+    import trader.funding
     import trader.llm
     import trader.market_data
     import trader.orchestrator
@@ -54,6 +55,7 @@ def isolated(monkeypatch, tmp_path):
     for module in (
         trader.coinbase_client,
         trader.execution,
+        trader.funding,
         trader.llm,
         trader.market_data,
         trader.orchestrator,

@@ -420,7 +420,7 @@ def test_schema_upgrade_preserves_order_history(cfg, store, intent, tmp_path):
     with_db = Storage(tmp_path / "trader.sqlite3")
     try:
         assert with_db.saved_intent(intent.client_order_id)[0] == intent
-        assert with_db.db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert with_db.db.execute("PRAGMA user_version").fetchone()[0] == 4
         assert with_db.cancellations(intent.client_order_id) == []
     finally:
         with_db.close()

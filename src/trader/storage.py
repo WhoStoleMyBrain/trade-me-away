@@ -48,7 +48,7 @@ class Storage:
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1, 2, 3):
+        if version not in (0, 1, 2, 3, 4):
             raise SafetyError("DATABASE_VERSION_UNSUPPORTED")
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS trading_cycles (
@@ -108,6 +108,11 @@ class Storage:
                 baseline TEXT NOT NULL, latest TEXT NOT NULL,
                 PRIMARY KEY(mode, portfolio, day)
             );
+            CREATE TABLE IF NOT EXISTS cash_deposits (
+                reference TEXT PRIMARY KEY, portfolio TEXT NOT NULL,
+                created_at TEXT NOT NULL, amount TEXT NOT NULL, payload_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS deposits_portfolio ON cash_deposits(portfolio, created_at);
             CREATE TABLE IF NOT EXISTS api_usage (
                 request_id TEXT PRIMARY KEY, cycle_id TEXT NOT NULL, created_at TEXT NOT NULL,
                 model TEXT NOT NULL, reasoning_effort TEXT NOT NULL,
@@ -147,7 +152,11 @@ class Storage:
                         raise SafetyError("DATABASE_FOREIGN_KEY_FAILED")
             finally:
                 self.db.execute("PRAGMA foreign_keys=ON")
-        self.db.execute("PRAGMA user_version=3")
+        if "funding_total" not in {r[1] for r in self.db.execute("PRAGMA table_info(daily_marks)")}:
+            self.db.execute(
+                "ALTER TABLE daily_marks ADD COLUMN funding_total TEXT NOT NULL DEFAULT '0'"
+            )
+        self.db.execute("PRAGMA user_version=4")
         if "strategy" not in {r[1] for r in self.db.execute("PRAGMA table_info(trading_cycles)")}:
             self.db.execute(
                 "ALTER TABLE trading_cycles ADD COLUMN strategy TEXT NOT NULL DEFAULT 'default'"
@@ -312,6 +321,18 @@ class Storage:
 
     def mark_equity(self, mode: str, portfolio: str, equity: D, now: datetime) -> D:
         day = now.date().isoformat()
+        deposits = (
+            self.db.execute(
+                "SELECT created_at,amount FROM cash_deposits WHERE portfolio=? ORDER BY rowid",
+                (portfolio,),
+            ).fetchall()
+            if mode == "live"
+            else []
+        )
+        funding = sum((D(r["amount"]) for r in deposits), ZERO)
+        today_funding = sum(
+            (D(r["amount"]) for r in deposits if r["created_at"].startswith(day)), ZERO
+        )
         row = self.db.execute(
             "SELECT baseline FROM daily_marks WHERE mode=? AND portfolio=? AND day=?",
             (mode, portfolio, day),
@@ -320,17 +341,61 @@ class Storage:
             baseline = D(row[0])
         else:
             previous = self.db.execute(
-                """SELECT latest FROM daily_marks
+                """SELECT latest,funding_total FROM daily_marks
                 WHERE mode=? AND portfolio=? AND day<? ORDER BY day DESC LIMIT 1""",
                 (mode, portfolio, day),
             ).fetchone()
-            baseline = D(previous[0]) if previous else equity
+            # Include prior-day deposits even if no equity observation followed them. Today's
+            # deposits never dilute the loss fraction or clear a loss-triggered trading stop.
+            baseline = (
+                D(previous["latest"]) + funding - today_funding - D(previous["funding_total"])
+                if previous
+                else equity - today_funding
+            )
         with self.db:
             self.db.execute(
-                "INSERT OR REPLACE INTO daily_marks VALUES(?,?,?,?,?)",
-                (mode, portfolio, day, str(baseline), str(equity)),
+                "INSERT OR REPLACE INTO daily_marks VALUES(?,?,?,?,?,?)",
+                (mode, portfolio, day, str(baseline), str(equity), str(funding)),
             )
-        return max(ZERO, (baseline - equity) / baseline) if baseline else ZERO
+        # A portfolio first funded from zero still needs a loss limit on its first funded day.
+        first_funding = next(
+            (D(r["amount"]) for r in deposits if r["created_at"].startswith(day)), ZERO
+        )
+        denominator = baseline if baseline > 0 else first_funding
+        return max(ZERO, (baseline - equity + today_funding) / denominator) if denominator else ZERO
+
+    def deposit(self, reference: str) -> dict | None:
+        row = self.db.execute(
+            "SELECT * FROM cash_deposits WHERE reference=?", (reference,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def record_deposit(
+        self,
+        reference: str,
+        portfolio: str,
+        amount: D,
+        ledger: Ledger,
+        exchange: dict,
+        payload: dict,
+        now: datetime,
+    ) -> None:
+        """Commit the reviewed cash flow, both ledgers and its audit as one transaction."""
+        with self.db:
+            self.db.execute(
+                "INSERT INTO cash_deposits VALUES(?,?,?,?,?)",
+                (reference, portfolio, now.isoformat(), str(amount), dumps(payload)),
+            )
+            self._save_ledger("live", portfolio, ledger)
+            self.db.execute(
+                "UPDATE exchange_state SET state_json=? WHERE portfolio=?",
+                (dumps(exchange), portfolio),
+            )
+            self.db.execute(
+                "INSERT INTO reconciliation_events(cycle_id,mode,created_at,subject,payload_json) "
+                "VALUES(?,?,?,?,?)",
+                (reference, "live", now.isoformat(), portfolio, dumps(payload)),
+            )
 
     def trades_today(self, mode: str, portfolio: str, now: datetime) -> int:
         # Count submissions, even rejections, to bound churn. Fill history supplies actual turnover.
@@ -582,6 +647,7 @@ class Storage:
             "api_usage",
             "exchange_state",
             "daily_marks",
+            "cash_deposits",
             "cancellation_attempts",
         }
         if table not in allowed:

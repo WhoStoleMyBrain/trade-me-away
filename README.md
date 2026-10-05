@@ -103,8 +103,9 @@ key's newlines; a quoted dotenv value containing escaped `\n` is supported.
 Grant **view** permission and, for eventual live use with a mode-only switch, **trade** permission.
 Do not grant transfer permission: startup rejects keys with that permission or an unknown permission
 state. A view-only key works in paper mode; it must be replaced before live trading. Use a dedicated
-strategy portfolio with USDC and only the configured crypto assets. Manually fund it before the
-first run. This application has no deposit, conversion, transfer, or withdrawal operations.
+strategy portfolio with USDC and only the configured crypto assets. For live trading, fund it before
+the first `doctor`/`reconcile`/`run`, which can establish its baseline. Later USDC top-ups use
+`record-deposit` below. The application never initiates funding, conversions, transfers or withdrawals.
 
 CDP keys select their permissioned portfolio; the deprecated `retail_portfolio_id` order parameter
 does not route orders for those keys. Startup compares the API's `portfolio_uuid` against your
@@ -228,6 +229,45 @@ outstanding orders/holds and unresolved live orders still block both modes.
 In **live**, unexplained balances, manual trades and unexpected holdings still block trading.
 `reconcile` is read-only at Coinbase and does not accept discrepancies. Reconciliation failures now
 include the portfolio and specific reasons in CLI output.
+
+### Adding USDC to a live portfolio
+
+For an already initialized live portfolio, pause its trading timers, let active commands finish,
+resolve pending orders, and add USDC externally using Coinbase. Wait until it is available, then
+check Coinbase activity: the increase must be your deposit alone, with no other unexplained changes.
+From the project directory, with your existing `.env` explicitly set to `TRADING_MODE=live`:
+
+```bash
+.venv/bin/python3.12 -m trader record-deposit \
+  --portfolio btc --amount 100 --reference btc-topup-20261005-01
+.venv/bin/python3.12 -m trader show-deposits
+.venv/bin/python3.12 -m trader reconcile
+```
+
+Use the configured portfolio name and **exact credited USDC amount**. Choose a unique, non-secret
+reference (letters, digits, `_`, `.`, `:`, `-`; at most 80 characters). On the VM, replace
+`.venv/bin/python3.12` with `sudo -u crypto-trader .venv/bin/python3.14`. Resume the paused timers
+after successful reconciliation. This command performs Coinbase reads and local accounting only;
+it makes no orders, transfers or OpenAI calls and works without API budget approval.
+
+`record-deposit` records your explicit confirmation of external funding; it checks balances and
+recent fills, **not Coinbase deposit-transaction history**. The declared increase must match exactly.
+Other discrepancies, stale data, history gaps, pending orders or holds prevent acceptance. The
+command requires an existing live ledger, equity baseline and checkpoint; it cannot bootstrap from a mismatched
+paper checkpoint. If it fails, no deposit or balance adjustment is committed. Do not retry with an
+invented amount, edit the database or increase tolerances to make it pass.
+
+The shared process lock prevents overlap with trading/maintenance. Cash, the exchange checkpoint
+and the deposit audit commit together. Repeating the same reference/portfolio/amount returns
+`ALREADY_RECORDED`; reusing a reference with different details fails. Deposits are separate from
+trading PnL. Deposits recorded today do not erase or dilute today's loss fraction; they join the
+next UTC day's equity baseline, including when no cycle ran after funding. A first deposit into a
+zero-equity portfolio supplies its initial loss denominator. Historical snapshots stay unchanged;
+raw equity changes must be interpreted alongside `show-deposits`.
+
+Only positive USDC deposits are supported. Crypto deposits, withdrawals and arbitrary balance
+adjustments still require investigation. In **paper**, real funding needs no command and does not
+increase simulated capital; `paper_initial_usdc` seeds new paper ledgers only.
 
 SQLite uses WAL, full synchronous commits, foreign keys, unique cycle/client IDs, and atomic fill /
 ledger / expected-balance updates. An OS lock prevents overlapping commands using the same database.
@@ -383,8 +423,9 @@ are ignored by Git. Files created by the CLI use a restrictive umask.
 
 Tables include `trading_cycles`, `market_snapshots`, `computed_features`, `portfolio_snapshots`,
 `model_requests`, `model_decisions`, `risk_results`, `order_intents`, `orders`, `fills`,
-`strategy_state`, `api_usage`, `exchange_state`, `daily_marks`, `reconciliation_events`, and
-`cancellation_attempts`. Database schema v1 upgrades to v2 without removing history.
+`strategy_state`, `api_usage`, `exchange_state`, `daily_marks`, `reconciliation_events`,
+`cash_deposits`, and `cancellation_attempts`. Existing schemas v1–v3 upgrade automatically to v4
+without removing history. Stop services and back up SQLite before upgrading; older code rejects v4.
 Domain payloads are JSON; monetary values are decimal strings. Times are UTC. Orders and fills are
 mode-tagged. A cycle ID connects all activity. Inspection commands work offline without Coinbase
 connectivity; trading, doctor, and reconciliation perform startup checks.
