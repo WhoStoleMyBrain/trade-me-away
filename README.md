@@ -549,6 +549,27 @@ Check `systemctl cat crypto-trader-orders.timer` for old local overrides: a drop
 additional boot/interval triggers. Leave `crypto-trader.timer` disabled when using the named
 strategy timers. No systemd changes are applied automatically by installing the Python package.
 
+For a deployment installed from a home-directory checkout, `/opt/crypto-trader` does not need to
+be a Git repository. Git updates belong in the original checkout. After stopping scheduling,
+allowing active work to finish and backing up the configuration, SQLite database and installed
+venv, build a wheel from the reviewed commit and install it into `/opt/crypto-trader/.venv` with
+that venv's Python. Reinstall the application even when its version is unchanged (currently
+`0.1.0`); pulling the checkout alone does not update an installed copy. Validate dependencies,
+the service-user import and `doctor` before resuming the configured timers in the existing mode.
+Keep `.env`, `config.yaml`, `constants.py` and `var/` in place. Do not initialize Git in the runtime,
+copy a venv from another machine, or replace the runtime directory with the checkout.
+
+Use a regular package/wheel installation for this layout. An editable installation pointing into
+`/home` conflicts with the service's `ProtectHome=true`. The wheel contains the Python package;
+copy any updated `deploy/systemd` files separately from the same reviewed source revision.
+Record the installed commit (for example in `/opt/crypto-trader/DEPLOYED_COMMIT`), since the source
+checkout's HEAD and the package version alone do not identify the code currently running.
+Shell variables do not survive an SSH reconnect. Keep the selected build path on disk, reconstruct
+the wheel path and commit from that build, and check them before installation. Run deployment steps
+in a separate Bash process that stops on failure without closing the SSH session; record the commit
+only after installation and service-user imports succeed. `pip check` alone verifies dependency
+compatibility, not whether the intended application revision was installed.
+
 ## Adding another cryptocurrency or portfolio
 
 Risk-policy A/B tests use distinct Coinbase portfolios (also in paper mode), each holding only
