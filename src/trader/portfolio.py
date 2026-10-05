@@ -13,17 +13,16 @@ from trader.schemas import (
     StrategyPosition,
 )
 from trader.storage import Storage
-from trader.util import ZERO, D, timestamp
+from trader.util import ZERO, D, event, timestamp
 
 
 def account_totals(actual: AccountState) -> dict[str, str]:
     return {currency: str(balance.total) for currency, balance in actual.balances.items()}
 
 
-def reconcile_actual(
-    store: Storage, actual: AccountState, cfg: AppConfig, cycle: str, mode: str
-) -> None:
-    expected = store.exchange(actual.portfolio)
+def reconciliation_reasons(
+    store: Storage, actual: AccountState, cfg: AppConfig, expected: dict | None
+) -> list[str]:
     allowed = {"USDC"} | {
         a.product_id.split("-")[0] for a in cfg.enabled_assets if a.portfolio == actual.portfolio
     }
@@ -65,6 +64,25 @@ def reconcile_actual(
                 and timestamp(fill["trade_time"]) >= timestamp(expected["initialized_at"])
             ):
                 reasons.append("UNTRACKED_FILL")
+    return sorted(set(reasons))
+
+
+def reconcile_actual(
+    store: Storage, actual: AccountState, cfg: AppConfig, cycle: str, mode: str
+) -> None:
+    expected = store.exchange(actual.portfolio)
+    reasons = reconciliation_reasons(store, actual, cfg, expected)
+    observations = []
+    if mode == "paper":
+        # Real cash/holdings do not fund the paper ledger. Keep the live checkpoint intact:
+        # observing a discrepancy in paper must not accept it for a subsequent live run.
+        observations = [
+            r
+            for r in reasons
+            if r.startswith("BALANCE_MISMATCH:")
+            or r in ("UNVALUED_ASSET", "RECONCILIATION_HISTORY_GAP")
+        ]
+        reasons = [r for r in reasons if r not in observations]
     store.audit(
         "reconciliation_events",
         cycle,
@@ -72,25 +90,36 @@ def reconcile_actual(
         actual.portfolio,
         {
             "status": "FAILED" if reasons else "OK",
-            "reasons": sorted(set(reasons)),
-            "actual_balances": totals,
+            "reasons": reasons,
+            "observations": observations,
+            "actual_balances": account_totals(actual),
             "expected_balances": expected["balances"] if expected else None,
         },
     )
     if reasons:
-        raise SafetyError("RECONCILIATION_FAILED")
+        raise SafetyError(
+            "RECONCILIATION_FAILED", details={"portfolio": actual.portfolio, "reasons": reasons}
+        )
+    if observations:
+        event(
+            "paper_exchange_change_observed",
+            cycle,
+            mode,
+            portfolio=actual.portfolio,
+            reasons=observations,
+        )
     if expected is None:
         store.initialize_exchange(
             actual.portfolio,
             {
                 "portfolio_id": actual.portfolio_id,
-                "balances": totals,
+                "balances": account_totals(actual),
                 "baseline_fill_ids": [f["entry_id"] for f in actual.recent_fills],
                 "last_reconciled_at": actual.observed_at.isoformat(),
             },
             actual.observed_at,
         )
-    else:
+    elif not observations:
         store.exchange_seen(actual.portfolio, actual.observed_at)
 
 

@@ -163,7 +163,9 @@ class CoinbaseAdapter:
             raise SafetyError("CANDLES_MISSING")
         return data["candles"]
 
-    def account(self, required_currencies: set[str]) -> AccountState:
+    def account(
+        self, required_currencies: set[str], *, allow_missing_usdc: bool = False
+    ) -> AccountState:
         # Timestamp the start, conservatively accounting for pagination/read latency.
         observed_at = utcnow()
         accounts = self.pages("get_accounts", "accounts")
@@ -188,7 +190,12 @@ class CoinbaseAdapter:
                 hold=decimal(account["hold"]["value"]),
             )
         if "USDC" not in balances:
-            raise SafetyError("USDC_ACCOUNT_MISSING")
+            if not allow_missing_usdc:
+                raise SafetyError("USDC_ACCOUNT_MISSING", details={"portfolio": self.portfolio})
+            # Paper capital is local. An empty real portfolio provides no account-level identity
+            # evidence, so verify the key's portfolio before representing absent USDC as zero.
+            self.check_permissions("paper")
+            balances["USDC"] = Balance(available=ZERO, hold=ZERO)
         # A complete authenticated account listing establishes zero for absent crypto accounts.
         for currency in required_currencies:
             balances.setdefault(currency, Balance(available=ZERO, hold=ZERO))

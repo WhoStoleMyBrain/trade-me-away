@@ -15,7 +15,7 @@ def test_reconciliation_mismatch_is_not_rebaselined(cfg, store, actual):
     balances = actual.balances | {"BTC": Balance(available=D("0.1"), hold=D("0"))}
     changed = actual.model_copy(update={"balances": balances})
     with pytest.raises(SafetyError, match="RECONCILIATION_FAILED"):
-        reconcile_actual(store, changed, cfg, "c", "paper")
+        reconcile_actual(store, changed, cfg, "c", "live")
     assert store.exchange("main")["balances"]["BTC"] == "0"
     assert "BALANCE_MISMATCH:BTC" in store.rows("reconciliation_events")[0]["payload_json"]
 
@@ -48,7 +48,7 @@ def test_untracked_round_trip_and_unknown_assets_fail(cfg, store, actual):
         update={"balances": actual.balances | {"UNKNOWN": Balance(available=D("1"), hold=D("0"))}}
     )
     with pytest.raises(SafetyError):
-        reconcile_actual(store, changed, cfg, "c", "paper")
+        reconcile_actual(store, changed, cfg, "c", "live")
 
 
 def test_preexisting_cost_basis_is_unknown(cfg, actual):
@@ -114,5 +114,43 @@ def test_history_gap_cannot_silently_skip_external_fills(cfg, store, actual):
     reconcile_actual(store, actual, cfg, "c", "paper")
     old = actual.model_copy(update={"observed_at": NOW + timedelta(days=7)})
     with pytest.raises(SafetyError, match="RECONCILIATION_FAILED"):
-        reconcile_actual(store, old, cfg, "c", "paper")
+        reconcile_actual(store, old, cfg, "c", "live")
     assert "RECONCILIATION_HISTORY_GAP" in store.rows("reconciliation_events")[0]["payload_json"]
+
+
+@pytest.mark.parametrize(
+    "currency,amount", [("USDC", "0"), ("USDC", "1100"), ("BTC", "2"), ("OTHER", "3")]
+)
+def test_paper_balance_changes_preserve_both_ledgers_and_live_checkpoint(
+    cfg, store, actual, currency, amount
+):
+    reconcile_actual(store, actual, cfg, "c", "paper")
+    ledger = seed_ledger(actual, cfg, paper=True)
+    store.save_ledger("paper", "main", ledger)
+    store.save_ledger("live", "main", ledger)
+    expected = store.exchange("main")
+    changed = actual.model_copy(
+        update={
+            "observed_at": NOW + timedelta(days=7),
+            "balances": actual.balances | {currency: Balance(available=D(amount), hold=D("0"))},
+        }
+    )
+    reconcile_actual(store, changed, cfg, "c2", "paper")
+    assert store.ledger("paper", "main") == ledger
+    assert store.ledger("live", "main") == ledger
+    assert store.exchange("main") == expected
+    assert "RECONCILIATION_HISTORY_GAP" in store.rows("reconciliation_events")[0]["payload_json"]
+    with pytest.raises(SafetyError, match="RECONCILIATION_FAILED"):
+        reconcile_actual(store, changed, cfg, "c3", "live")
+
+
+def test_paper_balance_change_does_not_hide_portfolio_mapping_change(cfg, store, actual):
+    reconcile_actual(store, actual, cfg, "c", "paper")
+    changed = actual.model_copy(
+        update={
+            "portfolio_id": "wrong-portfolio",
+            "balances": actual.balances | {"USDC": Balance(available=D("1100"), hold=D("0"))},
+        }
+    )
+    with pytest.raises(SafetyError, match="RECONCILIATION_FAILED"):
+        reconcile_actual(store, changed, cfg, "c2", "paper")

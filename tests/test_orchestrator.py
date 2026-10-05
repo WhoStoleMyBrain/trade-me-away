@@ -83,22 +83,30 @@ def test_hold_cycle_has_no_orders(cfg, store, adapter, sdk, openai_mock):
     assert all(D(r["executed_notional"]) == 0 for r in records)
 
 
+def test_complete_paper_cycle_with_entirely_empty_coinbase_portfolio(
+    cfg, store, adapter, sdk, openai_mock
+):
+    sdk.get_accounts.side_effect = None
+    sdk.get_accounts.return_value = {"accounts": [], "has_next": False}
+    service(cfg, store, adapter, openai_mock).run()
+    assert store.rows("trading_cycles")[0]["status"] == "COMPLETED"
+    assert len(store.rows("fills")) == 3
+    assert 0 < store.ledger("paper", "main").cash < cfg.portfolios["main"].paper_initial_usdc
+    assert store.exchange("main")["balances"]["USDC"] == "0"
+    assert store.ledger("live", "main") is None
+    openai_mock.responses.create.assert_called_once()
+    sdk.limit_order_ioc.assert_not_called()
+    sdk.market_order_buy.assert_not_called()
+    sdk.cancel_orders.assert_not_called()
+
+
 @pytest.mark.parametrize(
-    "problem", ["candles", "balance", "open_order", "stale", "permission", "budget", "fees"]
+    "problem", ["candles", "open_order", "stale", "permission", "budget", "fees"]
 )
 def test_preflight_failures_skip_openai(cfg, store, adapter, sdk, actual, openai_mock, problem):
     app = service(cfg, store, adapter, openai_mock)
     if problem == "candles":
         sdk.get_candles.side_effect = lambda **kwargs: {"candles": []}
-    elif problem == "balance":
-        from trader.portfolio import reconcile_actual
-
-        reconcile_actual(store, actual, cfg, "c", "paper")
-        sdk.account_state["value"] = actual.model_copy(
-            update={
-                "balances": actual.balances | {"USDC": Balance(available=D("900"), hold=D("0"))}
-            }
-        )
     elif problem == "open_order":
         sdk.list_orders.return_value = {
             "has_next": False,
@@ -135,6 +143,33 @@ def test_preflight_failures_skip_openai(cfg, store, adapter, sdk, actual, openai
     openai_mock.responses.create.assert_not_called()
     sdk.limit_order_ioc.assert_not_called()
     assert store.rows("trading_cycles")[0]["status"] == "HOLD"
+
+
+@pytest.mark.parametrize("during_decision", [False, True])
+def test_paper_cycle_trades_simulated_cash_despite_real_balance_changes(
+    cfg, store, adapter, sdk, actual, openai_mock, during_decision
+):
+    app = service(cfg, store, adapter, openai_mock)
+    app.startup("initialize")
+    initial = store.exchange("main")
+    response = openai_mock.responses.create.return_value
+
+    def change_balance(**kwargs):
+        sdk.account_state["value"] = actual.model_copy(
+            update={"balances": actual.balances | {"USDC": Balance(available=D("0"), hold=D("0"))}}
+        )
+        return response
+
+    if during_decision:
+        openai_mock.responses.create.side_effect = change_balance
+    else:
+        change_balance()
+    app.run()
+    assert store.rows("trading_cycles")[0]["status"] == "COMPLETED"
+    assert len(store.rows("fills")) == 3
+    assert store.ledger("paper", "main").cash < D("1000")
+    assert store.exchange("main") == initial
+    sdk.limit_order_ioc.assert_not_called()
 
 
 def test_preexecution_price_move_aborts_without_second_model_call(

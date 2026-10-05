@@ -8,6 +8,55 @@ from trader.errors import SafetyError
 from trader.util import safe_read
 
 
+@pytest.mark.parametrize("empty", [False, True])
+def test_paper_can_read_portfolios_without_usdc_after_identity_check(adapter, sdk, empty):
+    accounts = sdk.get_accounts.side_effect()["accounts"]
+    sdk.get_accounts.side_effect = None
+    sdk.get_accounts.return_value = {
+        "accounts": [] if empty else [a for a in accounts if a["currency"] != "USDC"],
+        "has_next": False,
+    }
+    # Strict is the default, also when the process environment happens to say paper. Live order
+    # settlement/recovery and deposit verification use this strict path.
+    with pytest.raises(SafetyError, match="USDC_ACCOUNT_MISSING") as error:
+        adapter.account({"USDC", "BTC"})
+    assert error.value.details == {"portfolio": "main"}
+    account = adapter.account({"USDC", "BTC"}, allow_missing_usdc=True)
+    assert account.balances["USDC"].total == 0
+    assert account.balances["BTC"].total == 0
+    sdk.get_api_key_permissions.assert_called_once()
+    assert sdk.list_orders.call_count == 5
+    sdk.get_fills.assert_called_once()
+
+
+def test_existing_zero_usdc_account_is_valid_in_strict_reads(adapter, sdk, actual):
+    from trader.schemas import Balance
+    from trader.util import ZERO
+
+    sdk.account_state["value"] = actual.model_copy(
+        update={"balances": actual.balances | {"USDC": Balance(available=ZERO, hold=ZERO)}}
+    )
+    assert adapter.account({"USDC", "BTC"}).balances["USDC"].total == 0
+
+
+@pytest.mark.parametrize("problem", ["identity", "permission", "pagination", "orders", "fills"])
+def test_empty_paper_account_does_not_bypass_account_or_order_checks(adapter, sdk, problem):
+    sdk.get_accounts.side_effect = None
+    sdk.get_accounts.return_value = {"accounts": [], "has_next": False}
+    if problem == "identity":
+        sdk.get_api_key_permissions.return_value["portfolio_uuid"] = "wrong"
+    elif problem == "permission":
+        sdk.get_api_key_permissions.return_value["can_view"] = False
+    elif problem == "pagination":
+        sdk.get_accounts.return_value["has_next"] = True  # No cursor: incomplete response.
+    elif problem == "orders":
+        sdk.list_orders.return_value = {"orders": [], "has_next": True}
+    else:
+        sdk.get_fills.return_value["proof_token_required"] = True
+    with pytest.raises(SafetyError):
+        adapter.account({"USDC", "BTC"}, allow_missing_usdc=True)
+
+
 def test_active_order_sdk_queries_single_status_and_paginates_each(monkeypatch, sdk):
     from coinbase.rest import RESTClient
 

@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from trader.coinbase_client import CoinbaseAdapter
-from trader.config import GRANULARITIES, AppConfig
+from trader.config import GRANULARITIES, AppConfig, Mode
 from trader.errors import SafetyError
 from trader.features import compute_features
 from trader.schemas import AccountState, MarketState, Product, Quote
@@ -23,19 +23,21 @@ class MarketData:
     def __init__(self, cfg: AppConfig, adapters: dict[str, CoinbaseAdapter], store: Storage):
         self.cfg, self.adapters, self.store = cfg, adapters, store
 
-    def accounts(self) -> dict[str, AccountState]:
+    def accounts(self, mode: Mode = "live") -> dict[str, AccountState]:
         def fetch(name: str) -> AccountState:
             currencies = {
                 a.product_id.split("-")[0] for a in self.cfg.enabled_assets if a.portfolio == name
             }
             adapter = self.adapters[name]
             adapter.check_fee_rate(self.cfg.execution.taker_fee_rate)
-            return adapter.account(currencies | {"USDC"})
+            return adapter.account(currencies | {"USDC"}, allow_missing_usdc=mode == "paper")
 
         with ThreadPoolExecutor(max_workers=min(8, len(self.adapters))) as pool:
             return dict(zip(self.adapters, pool.map(fetch, self.adapters), strict=True))
 
-    def refresh(self) -> tuple[dict[str, tuple[Product, Quote]], dict[str, AccountState]]:
+    def refresh(
+        self, mode: Mode = "live"
+    ) -> tuple[dict[str, tuple[Product, Quote]], dict[str, AccountState]]:
         def fetch(asset):
             adapter = self.adapters[asset.portfolio]
             return asset.product_id, (
@@ -45,7 +47,7 @@ class MarketData:
 
         # Refresh every mapped asset to value shared portfolios consistently.
         with ThreadPoolExecutor(max_workers=min(8, len(self.cfg.enabled_assets) + 1)) as pool:
-            accounts = pool.submit(self.accounts)
+            accounts = pool.submit(self.accounts, mode)
             markets = dict(pool.map(fetch, self.cfg.decision_assets))
             actual = accounts.result()
         self.validate_snapshot([q for _, q in markets.values()], actual)
@@ -87,7 +89,7 @@ class MarketData:
             )
 
         with ThreadPoolExecutor(max_workers=min(8, len(self.cfg.enabled_assets) + 1)) as pool:
-            account_future = pool.submit(self.accounts)
+            account_future = pool.submit(self.accounts, mode)
             collected = list(pool.map(fetch, self.cfg.decision_assets))
             actual = account_future.result()
         markets = {}

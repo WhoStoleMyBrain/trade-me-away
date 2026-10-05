@@ -36,8 +36,9 @@ flowchart TD
 ```
 
 The same orchestrator, schema, prompt, risk engine, and pre-execution refresh serve both modes.
-The executor owns the active balance ledger and final execution effects. Paper mode still obtains
-and reconciles actual Coinbase accounts, but uses its own persisted simulated balances for sizing.
+The executor owns the active balance ledger and final execution effects. Paper mode still checks
+actual Coinbase account identity and orders, but real balance changes are informational; sizing
+uses only its own persisted simulated balances.
 Changing mode does not copy paper holdings into Coinbase or reset either ledger.
 
 Modules in `src/trader` separate configuration, schemas, the Coinbase adapter, market collection,
@@ -210,12 +211,23 @@ trading before sizing. Unknown fee schedules, cost-plus commissions, and nonzero
 closed because their complete commission semantics are not implemented. Set a conservative fee
 allowance and review your actual account tier; the example's 0.6% is not a universal Coinbase rate.
 
-The actual Coinbase balance checkpoint remains separate from both strategy ledgers. After initial
-bootstrap, external deposits, withdrawals, manual trades, unexpected holdings, mapping changes,
-or material discrepancies block trading in **both** modes. Unknown recent fills also block trading,
-including a round trip that leaves balances unchanged. An absence longer than six days exceeds the
-seven-day recent-fill reconciliation window and requires operator investigation. `reconcile` is
-read-only at Coinbase and does not reset mismatches or silently adopt external changes.
+The actual Coinbase balance checkpoint remains separate from both strategy ledgers. In **paper**,
+real cash/crypto balance changes (including unconfigured holdings) are recorded as observations and
+never change simulated cash or stop a cycle by themselves. No configuration change is needed.
+New, empty Coinbase portfolios also work in paper mode: if no USDC account entry exists, the
+adapter verifies the API key's portfolio and represents real USDC as zero. No real deposit is
+needed; simulated cash comes from `paper_initial_usdc`. Account pagination, permissions, orders
+and fills must still pass their checks. Live execution/recovery still requires a USDC account
+entry; `USDC_ACCOUNT_MISSING` now identifies the affected portfolio.
+`paper_exchange_change_observed` logs the affected portfolio/reasons; SQLite retains the amounts.
+An observation does not accept the difference into the live checkpoint or advance its verified
+timestamp. Paper also tolerates an old checkpoint; live still requires review after a six-day gap
+because only seven days of recent fills are checked. Portfolio mapping errors, unknown recent fills,
+outstanding orders/holds and unresolved live orders still block both modes.
+
+In **live**, unexplained balances, manual trades and unexpected holdings still block trading.
+`reconcile` is read-only at Coinbase and does not accept discrepancies. Reconciliation failures now
+include the portfolio and specific reasons in CLI output.
 
 SQLite uses WAL, full synchronous commits, foreign keys, unique cycle/client IDs, and atomic fill /
 ledger / expected-balance updates. An OS lock prevents overlapping commands using the same database.

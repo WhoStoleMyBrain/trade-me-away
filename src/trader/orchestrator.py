@@ -63,7 +63,7 @@ class Orchestrator:
             allow_cancel=allow_cancel and self.mode == "live",
             env_file=self.executor.env_file,
         )
-        refreshed, actual = self.market.refresh()
+        refreshed, actual = self.market.refresh(self.mode)
         for product, _ in refreshed.values():
             if not product.tradable or (
                 self.cfg.execution.order_type == "market_ioc" and not product.market_allowed
@@ -224,7 +224,7 @@ class Orchestrator:
                 def guard(intent: OrderIntent) -> OrderIntent:
                     nonlocal stage
                     stage = "pre_execution"
-                    refreshed, accounts = self.market.refresh()
+                    refreshed, accounts = self.market.refresh(self.mode)
                     updated = self.portfolios(
                         accounts, {p: q for p, (_, q) in refreshed.items()}, cycle, "pre_execution"
                     )
@@ -301,7 +301,7 @@ class Orchestrator:
                 # Refresh the entire portfolio after each execution, so shared cash/exposure and
                 # daily limits are updated before considering another asset from the fixed batch.
                 stage = "post_execution"
-                refreshed, accounts = self.market.refresh()
+                refreshed, accounts = self.market.refresh(self.mode)
                 states = self.portfolios(
                     accounts, {p: q for p, (_, q) in refreshed.items()}, cycle, "after_execution"
                 )

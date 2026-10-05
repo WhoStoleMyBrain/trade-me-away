@@ -80,6 +80,29 @@ def test_cli_errors_never_print_secrets(cfg, monkeypatch, tmp_path, capsys):
     assert "SECRET_SENTINEL" not in captured.out + captured.err
 
 
+@pytest.mark.parametrize("mode", ["paper", "live"])
+def test_doctor_empty_portfolio_is_supported_only_in_paper(
+    cfg, adapter, sdk, openai_mock, monkeypatch, tmp_path, capsys, mode
+):
+    write_config(cfg, monkeypatch, tmp_path)
+    monkeypatch.setenv("TRADING_MODE", mode)
+    monkeypatch.setattr("trader.coinbase_client.build_adapters", lambda *_: {"main": adapter})
+    monkeypatch.setattr("openai.OpenAI", lambda **_: openai_mock)
+    sdk.get_accounts.side_effect = None
+    sdk.get_accounts.return_value = {"accounts": [], "has_next": False}
+    assert main(["doctor"]) == (0 if mode == "paper" else 1)
+    output = capsys.readouterr().out
+    if mode == "paper":
+        assert '"status":"OK"' in output
+        openai_mock.models.retrieve.assert_called_once()
+    else:
+        assert "USDC_ACCOUNT_MISSING" in output
+        assert '"portfolio":"main"' in output
+        openai_mock.models.retrieve.assert_not_called()
+    sdk.limit_order_ioc.assert_not_called()
+    sdk.market_order_buy.assert_not_called()
+
+
 @pytest.mark.parametrize("late_sdk_logging", [False, True])
 def test_sdk_owned_log_handler_is_silenced(capsys, late_sdk_logging):
     import requests
